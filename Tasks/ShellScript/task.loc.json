@@ -11,9 +11,9 @@
   ],
   "author": "Microsoft Corporation",
   "version": {
-    "Major": 1,
+    "Major": 2,
     "Minor": 0,
-    "Patch": 17
+    "Patch": 0
   },
   "demands": [
     "sh"
@@ -28,12 +28,25 @@
   ],
   "inputs": [
     {
+      "name": "type",
+      "type": "pickList",
+      "label": "ms-resource:loc.input.label.type",
+      "defaultValue": "FilePath",
+      "required": true,
+      "helpMarkDown": "ms-resource:loc.input.help.type",
+      "options": {
+        "InlineScript": "Inline Script",
+        "FilePath": "File Path"
+      }
+    },
+    {
       "name": "scriptPath",
       "type": "filePath",
       "label": "ms-resource:loc.input.label.scriptPath",
       "defaultValue": "",
       "required": true,
-      "helpMarkDown": "ms-resource:loc.input.help.scriptPath"
+      "helpMarkDown": "ms-resource:loc.input.help.scriptPath",
+      "visibleRule": "type = FilePath"
     },
     {
       "name": "args",
@@ -41,7 +54,8 @@
       "label": "ms-resource:loc.input.label.args",
       "defaultValue": "",
       "required": false,
-      "helpMarkDown": "ms-resource:loc.input.help.args"
+      "helpMarkDown": "ms-resource:loc.input.help.args",
+      "visibleRule": "type = FilePath"
     },
     {
       "name": "cwd",
@@ -60,6 +74,18 @@
       "required": false,
       "helpMarkDown": "ms-resource:loc.input.help.failOnStandardError",
       "groupName": "advanced"
+    },
+    {
+      "name": "script",
+      "type": "multiLine",
+      "label": "ms-resource:loc.input.label.script",
+      "defaultValue": "echo 'Hello World'",
+      "required": true,
+      "helpMarkDown": "ms-resource:loc.input.help.script",
+      "visibleRule": "type = InlineScript",
+      "properties":{
+                "rows": 4
+            }
     }
   ],
   "execution": {

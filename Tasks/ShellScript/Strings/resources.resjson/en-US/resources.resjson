@@ -4,6 +4,8 @@
   "loc.description": "Run a shell script using bash",
   "loc.instanceNameFormat": "Shell Script $(scriptPath)",
   "loc.group.displayName.advanced": "Advanced",
+  "loc.input.label.type": "Type",
+  "loc.input.help.type": "File Path or Inline Script",
   "loc.input.label.scriptPath": "Script Path",
   "loc.input.help.scriptPath": "Relative path from repo root of the shell script file to run.",
   "loc.input.label.args": "Arguments",
@@ -12,6 +14,8 @@
   "loc.input.help.cwd": "Current working directory when script is run.  Defaults to the folder where the script is located.",
   "loc.input.label.failOnStandardError": "Fail on Standard Error",
   "loc.input.help.failOnStandardError": "If this is true, this task will fail if any errors are written to the StandardError stream.",
+  "loc.input.label.script": "Script",
+  "loc.input.help.script": "Write your scripts in bash",
   "loc.messages.BashReturnCode": "Bash exited with return code: %d",
   "loc.messages.BashFailed": "Bash failed with error: %s"
 }
