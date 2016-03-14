@@ -24,7 +24,7 @@ if(type == 'InlineScript'){
 	scriptPath = cwd + "/user_script.sh"; 
 	fs.writeFileSync(scriptPath,script,'utf8');
 	
-	bash.arg(scriptPath);
+	bash.pathArg(scriptPath);
 	bash.exec(<any>{ failOnStdErr: failOnStdErr})
 	.then(function(code) {
 		// TODO: switch to setResult in the next couple of sprints
