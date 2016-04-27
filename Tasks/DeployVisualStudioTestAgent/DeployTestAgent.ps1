@@ -11,7 +11,8 @@ param(
     [string]$machinePassword,
     [string]$agentLocation,
     [string]$updateTestAgent,
-    [string]$isDataCollectionOnly
+    [string]$isDataCollectionOnly,
+    [string]$taskApiAccessScopeToken
 )
 
 # If Run as process (Run UI Tests) is true both autologon and disable screen saver needs to be true.
@@ -76,9 +77,13 @@ Write-Verbose "Getting the connection object"
 $connection = Get-VssConnection -TaskContext $distributedTaskContext
 
 Write-Verbose "Getting Personal Access Token for the Run"
-$vssEndPoint = Get-ServiceEndPoint -Context $distributedTaskContext -Name "SystemVssConnection"
-$personalAccessToken = Get-PersonalAccessToken $vssEndpoint
 
+$personalAccessToken = $taskApiAccessScopeToken
+
+if(!taskApiAccessScopeToken){
+    $vssEndPoint = Get-ServiceEndPoint -Context $distributedTaskContext -Name "SystemVssConnection"
+    $personalAccessToken = Get-PersonalAccessToken $vssEndpoint
+}
 if (!$personalAccessToken)
 {
     Write-Host "##vso[task.logissue type=error;code=Unable to generate Personal Access Token for the user;TaskName=DTA]"
