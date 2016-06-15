@@ -1,0 +1,52 @@
+{
+  "id": "67cec91b-0351-4c2f-8465-d74b3d2a2d96",
+  "name": "SCP",
+  "friendlyName": "ms-resource:loc.friendlyName",
+  "description": "ms-resource:loc.description",
+  "helpMarkDown": "ms-resource:loc.helpMarkDown",
+  "category": "Deploy",
+  "visibility": [
+    "Build",
+    "Release"
+  ],
+  "author": "Microsoft Corporation",
+  "version": {
+    "Major": 0,
+    "Minor": 1,
+    "Patch": 0
+  },
+  "demands": [],
+  "instanceNameFormat": "ms-resource:loc.instanceNameFormat",
+  "inputs": [
+    {
+      "name": "sshEndpoint",
+      "type": "connectedService:ssh",
+      "label": "ms-resource:loc.input.label.sshEndpoint",
+      "defaultValue": "",
+      "required": true,
+      "helpMarkDown": "ms-resource:loc.input.help.sshEndpoint"
+    },
+    {
+      "name": "sourceFiles",
+      "type": "filePath",
+      "label": "ms-resource:loc.input.label.sourceFiles",
+      "defaultValue": "",
+      "required": true,
+      "helpMarkDown": ""
+    },
+    {
+      "name": "destinationPath",
+      "type": "string",
+      "label": "ms-resource:loc.input.label.destinationPath",
+      "defaultValue": "",
+      "required": false,
+      "helpMarkDown": "ms-resource:loc.input.help.destinationPath"
+    }
+  ],
+  "execution": {
+    "Node": {
+      "target": "scp.js",
+      "argumentFormat": ""
+    }
+  }
+}

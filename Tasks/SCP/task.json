@@ -1,0 +1,53 @@
+{
+  "id": "67cec91b-0351-4c2f-8465-d74b3d2a2d96",
+  "name": "SCP",
+  "friendlyName": "SCP",
+  "description": "Copy files or build artifacts to remote machine using SSH",
+  "helpMarkDown": "",
+  "category": "Deploy",
+  "visibility": [
+    "Build",
+    "Release"
+  ],
+  "author": "Microsoft Corporation",
+  "version": {
+    "Major": 0,
+    "Minor": 1,
+    "Patch": 0
+  },
+  "demands": [
+  ],
+  "instanceNameFormat": "Securely copy files to remote machine",
+  "inputs": [
+    {
+      "name": "sshEndpoint",
+      "type": "connectedService:ssh",
+      "label": "SSH endpoint",
+      "defaultValue": "",
+      "required": true,
+      "helpMarkDown": "SSH endpoint with connection details for the remote machine."
+    },
+    {
+      "name": "sourceFiles",
+      "type": "filePath",
+      "label": "Source files",
+      "defaultValue": "",
+      "required": true,
+      "helpMarkDown": ""
+    },
+    {
+      "name": "destinationPath",
+      "type": "string",
+      "label": "Destination path",
+      "defaultValue": "",
+      "required": false,
+      "helpMarkDown": "Path on the remote machine to copy the files to. The path will be created if it does not exist."
+    }
+  ],
+  "execution": {
+    "Node": {
+      "target": "scp.js",
+      "argumentFormat": ""
+    }
+  }
+}

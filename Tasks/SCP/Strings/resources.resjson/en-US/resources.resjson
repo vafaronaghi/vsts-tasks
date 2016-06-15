@@ -1,0 +1,11 @@
+{
+  "loc.friendlyName": "SCP",
+  "loc.helpMarkDown": "",
+  "loc.description": "Copy files or build artifacts to remote machine using SSH",
+  "loc.instanceNameFormat": "Securely copy files to remote machine",
+  "loc.input.label.sshEndpoint": "SSH endpoint",
+  "loc.input.help.sshEndpoint": "SSH endpoint with connection details for the remote machine.",
+  "loc.input.label.sourceFiles": "Source files",
+  "loc.input.label.destinationPath": "Destination path",
+  "loc.input.help.destinationPath": "Path on the remote machine to copy the files to. The path will be created if it does not exist."
+}
