@@ -23,14 +23,14 @@ var password = serverEndpointAuth['parameters']['password'];
 
 var jobName = tl.getInput('jobName', true);
 
+var captureConsole = tl.getBoolInput('captureConsole', true);
+var captureConsolePollInterval = 5000; // five seconds is what the Jenkins Web UI uses
+
 var parameterizedJob = tl.getBoolInput('parameterizedJob', true);
 
 var jobQueueUrl = serverEndpointUrl + '/job/' + jobName
 jobQueueUrl += (parameterizedJob) ? '/buildWithParameters?delay=0sec' : '/build?delay=0sec';
 tl.debug('jobQueueUrl=' + jobQueueUrl);
-
-var captureConsole = tl.getBoolInput('captureConsole', true);
-var captureConsolePollInterval = 5000; // five seconds is what the Jenkins Web UI uses
 
 function failReturnCode(httpResponse, message: string): void {
     var fullMessage = message +
