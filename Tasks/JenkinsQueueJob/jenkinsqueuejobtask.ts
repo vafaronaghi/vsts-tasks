@@ -22,7 +22,11 @@ var username = serverEndpointAuth['parameters']['username'];
 var password = serverEndpointAuth['parameters']['password'];
 
 var jobName = tl.getInput('jobName', true);
-var jobQueueUrl = serverEndpointUrl + '/job/' + jobName + '/build';
+
+var parameterizedJob = tl.getBoolInput('parameterizedJob', true);
+
+var jobQueueUrl = serverEndpointUrl + '/job/' + jobName
+jobQueueUrl += (parameterizedJob) ? '/buildWithParameters?delay=0sec' : '/build?delay=0sec';
 tl.debug('jobQueueUrl=' + jobQueueUrl);
 
 var captureConsole = tl.getBoolInput('captureConsole', true);
@@ -33,8 +37,12 @@ function failReturnCode(httpResponse, message: string): void {
         '\nHttpResponse.statusCode=' + httpResponse.statusCode +
         '\nHttpResponse.statusMessage=' + httpResponse.statusMessage +
         '\nHttpResponse=\n' + JSON.stringify(httpResponse);
-    tl.debug(fullMessage);
-    tl.setResult(tl.TaskResult.Failed, fullMessage);
+    fail(fullMessage);
+}
+
+function fail(message: string): void {
+    tl.debug(message);
+    tl.setResult(tl.TaskResult.Failed, message);
 }
 
 // These are set once the job is successfully queued and don't change afterwards
@@ -151,10 +159,10 @@ function checkSuccess() {
             var parsedBody = JSON.parse(body);
             var resultCode = parsedBody.result;
             if (resultCode) {
-                resultCode = resultCode.toUpperCase(); 
+                resultCode = resultCode.toUpperCase();
                 var resultStr = getResultString(resultCode);
                 tl.debug(resultUrl + ' resultCode: ' + resultCode + ' resultStr: ' + resultStr);
-            
+
                 var completionMessage = 'Jenkins job: ' + resultCode + ' ' + jobName + ' ' + jenkinsExecutableUrl;
                 if (resultCode == "SUCCESS" || resultCode == 'UNSTABLE') {
                     createLinkAndFinish(tl.TaskResult.Succeeded, resultStr, completionMessage);
@@ -170,6 +178,36 @@ function checkSuccess() {
         }
     });
 }
+
+/**
+ * Supported parameter types: boolean, string, choice, password
+ * 
+ * - If a parameter is not defined by Jenkins it is fine to pass it anyway
+ * - Anything passed to a boolean parameter other than 'true' (case insenstive) becomes false.
+ * - Invalid choice parameters result in a 500 response.
+ * 
+ */
+function parseJobParameters() {
+    var formData = {};
+    var jobParameters: string[] = tl.getDelimitedInput('jobParameters', '\n', false);
+    for(var i =0; i< jobParameters.length; i++){
+        var paramLine = jobParameters[i];
+        var splitIndex = paramLine.indexOf('=');
+        if(splitIndex <= 0){ // either no paramValue (-1), or no paramName (0)
+            fail('Job parameters should be specified as "parameterName=parameterValue" with one name, value pair per line. Invalid parameter line: '+paramLine);
+        }
+        var paramName = paramLine.substr(0, splitIndex);
+        var paramValue = paramLine.slice(splitIndex+1);
+        formData[paramName] = paramValue;
+    }
+    return formData;
+}
+
+var initialPostData = parameterizedJob ?
+    { url: jobQueueUrl, formData: parseJobParameters() } :
+    { url: jobQueueUrl };
+
+tl.debug('initialPostData = ' + JSON.stringify(initialPostData));
 
 /**
  * This post starts the process by kicking off the job and then: 
@@ -191,7 +229,7 @@ function checkSuccess() {
  *    V
  * createLinkAndFinish()
  */
-request.post({ url: jobQueueUrl }, function optionalCallback(err, httpResponse, body) {
+request.post(initialPostData, function optionalCallback(err, httpResponse, body) {
     if (err) {
         tl.setResult(tl.TaskResult.Failed, err);
     } else if (httpResponse.statusCode != 201) {

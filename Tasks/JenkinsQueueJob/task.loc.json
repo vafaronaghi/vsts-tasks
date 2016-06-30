@@ -16,6 +16,13 @@
     "Minor": 0,
     "Patch": 1
   },
+  "groups": [
+    {
+      "name": "advanced",
+      "displayName": "ms-resource:loc.group.displayName.advanced",
+      "isExpanded": true
+    }
+  ],
   "instanceNameFormat": "ms-resource:loc.instanceNameFormat",
   "inputs": [
     {
@@ -41,6 +48,29 @@
       "defaultValue": true,
       "required": true,
       "helpMarkDown": "ms-resource:loc.input.help.captureConsole"
+    },
+    {
+      "name": "parameterizedJob",
+      "type": "boolean",
+      "label": "ms-resource:loc.input.label.parameterizedJob",
+      "defaultValue": false,
+      "required": true,
+      "helpMarkDown": "ms-resource:loc.input.help.parameterizedJob",
+      "groupName": "advanced"
+    },
+    {
+      "name": "jobParameters",
+      "type": "multiLine",
+      "label": "ms-resource:loc.input.label.jobParameters",
+      "defaultValue": "",
+      "required": false,
+      "helpMarkDown": "ms-resource:loc.input.help.jobParameters",
+      "groupName": "advanced",
+      "visibleRule": "parameterizedJob = true",
+      "properties": {
+        "resizable": "true",
+        "rows": "4"
+      }
     }
   ],
   "execution": {
