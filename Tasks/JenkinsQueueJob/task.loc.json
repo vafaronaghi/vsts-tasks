@@ -50,6 +50,15 @@
       "helpMarkDown": "ms-resource:loc.input.help.captureConsole"
     },
     {
+      "name": "capturePipeline",
+      "type": "boolean",
+      "label": "ms-resource:loc.input.label.capturePipeline",
+      "defaultValue": true,
+      "required": true,
+      "helpMarkDown": "ms-resource:loc.input.help.capturePipeline",
+      "visibleRule": "captureConsole = true"
+    },
+    {
       "name": "parameterizedJob",
       "type": "boolean",
       "label": "ms-resource:loc.input.label.parameterizedJob",

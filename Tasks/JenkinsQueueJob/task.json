@@ -50,6 +50,15 @@
         "helpMarkDown": "If selected, this step will capture the Jenkins build console output, wait for the Jenkins build to complete, and succeed/fail based on the Jenkins build result.  Otherwise, once the Jenkins job is successfully queued, this step will successfully complete without waiting for the Jenkins build to run."
       },
       {
+        "name": "capturePipeline",
+        "type": "boolean",
+        "label": "Capture pipeline output and wait for pipeline completion",
+        "defaultValue": true,
+        "required": true,
+        "helpMarkDown": "If selected, this step will capture the full Jenkins build pipeline console output, wait for the full Jenkins build pipeline to complete, and succeed/fail based on the Jenkins build pipeline result.  Otherwise, once the Jenkins job is completes, this step will successfully complete without waiting for full Jenkins build pipeline to run.",
+        "visibleRule":"captureConsole = true"
+      },
+      {
         "name": "parameterizedJob",
         "type": "boolean",
         "label": "Parameterized job",

@@ -10,6 +10,8 @@
   "loc.input.help.jobName": "The name of the Jenkins job to queue.  This must exactly match the job name on the Jenkins server.",
   "loc.input.label.captureConsole": "Capture console output and wait for completion",
   "loc.input.help.captureConsole": "If selected, this step will capture the Jenkins build console output, wait for the Jenkins build to complete, and succeed/fail based on the Jenkins build result.  Otherwise, once the Jenkins job is successfully queued, this step will successfully complete without waiting for the Jenkins build to run.",
+  "loc.input.label.capturePipeline": "Capture pipeline output and wait for pipeline completion",
+  "loc.input.help.capturePipeline": "If selected, this step will capture the full Jenkins build pipeline console output, wait for the full Jenkins build pipeline to complete, and succeed/fail based on the Jenkins build pipeline result.  Otherwise, once the Jenkins job is completes, this step will successfully complete without waiting for full Jenkins build pipeline to run.",
   "loc.input.label.parameterizedJob": "Parameterized job",
   "loc.input.help.parameterizedJob": "Select if the Jenkins job accepts parameters. This should be selected even if all the default parameters are used and no parameters are actually specified.",
   "loc.input.label.jobParameters": "Job parameters",

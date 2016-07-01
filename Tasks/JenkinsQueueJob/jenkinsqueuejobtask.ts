@@ -162,7 +162,7 @@ function checkSuccess() {
                 resultCode = resultCode.toUpperCase();
                 var resultStr = getResultString(resultCode);
                 tl.debug(resultUrl + ' resultCode: ' + resultCode + ' resultStr: ' + resultStr);
-
+                tl.debug("parsedBody for: "+resultUrl+ "\n" +JSON.stringify(parsedBody));
                 var completionMessage = 'Jenkins job: ' + resultCode + ' ' + jobName + ' ' + jenkinsExecutableUrl;
                 if (resultCode == "SUCCESS" || resultCode == 'UNSTABLE') {
                     createLinkAndFinish(tl.TaskResult.Succeeded, resultStr, completionMessage);
