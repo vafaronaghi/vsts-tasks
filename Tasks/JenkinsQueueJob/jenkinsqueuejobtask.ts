@@ -26,6 +26,9 @@ var jobName = tl.getInput('jobName', true);
 var captureConsole = tl.getBoolInput('captureConsole', true);
 var captureConsolePollInterval = 5000; // five seconds is what the Jenkins Web UI uses
 
+// capturePipeline is only possible if captureConsole mode is enabled
+var capturePipeline = captureConsole ? tl.getBoolInput('capturePipeline', true) : false;
+
 var parameterizedJob = tl.getBoolInput('parameterizedJob', true);
 
 var jobQueueUrl = serverEndpointUrl + '/job/' + jobName
@@ -45,10 +48,73 @@ function fail(message: string): void {
     tl.setResult(tl.TaskResult.Failed, message);
 }
 
-// These are set once the job is successfully queued and don't change afterwards
-var jenkinsTaskName;
-var jenkinsExecutableNumber
-var jenkinsExecutableUrl;
+class Job {
+    state: string;
+    executableUrl: string;
+    executableNumber: number;
+    name: string;
+    jobConsole: string;
+    jobConsoleOffset : number;
+    resultCode: string;
+    constructor(executableUrl: string, executableNumber: number, name: string){
+        this.executableUrl = executableUrl;
+        this.executableNumber = executableNumber;
+        this.name = name;
+        this.jobConsoleOffset = 0;
+        this.state = 'running';
+    }
+
+    consoleLog(message : string){
+        console.log(message);
+        this.jobConsole += message;
+    }
+
+    setResult(resultCode: string){
+        this.state = 'done';
+        this.resultCode = resultCode.toUpperCase();
+    }
+
+    getCompletionMessage() : string{
+        return 'Jenkins job: ' + this.getResultString() + ' ' + this.name + ' ' + this.executableUrl;
+    }
+
+    getSummaryTitle(){
+        return 'Jenkins ' + this.name + ' - ' + this.executableNumber + ' - ' + this.getResultString();
+    }
+
+    getResultString(): string {
+        if(this.state == 'running'){
+            return 'Queued'; 
+        }
+
+        // codes map to fields in http://hudson-ci.org/javadoc/hudson/model/Result.html
+        if (this.resultCode == 'SUCCESS') {
+            return 'Success';
+        } else if (this.resultCode == 'UNSTABLE') {
+            return 'Unstable';
+        } else if (this.resultCode == 'FAILURE') {
+            return 'Failure';
+        } else if (this.resultCode == 'NOT_BUILT') {
+            return 'Not built';
+        } else if (this.resultCode == 'ABORTED') {
+            return 'Aborted';
+        } else {
+            return this.resultCode;
+        }
+    }
+
+    getTaskResult() : number{
+        if(this.state == 'running'){
+            return tl.TaskResult.Succeeded;
+        } else if (this.resultCode == "SUCCESS" || this.resultCode == 'UNSTABLE') {
+            return tl.TaskResult.Succeeded;
+        } else {
+            return tl.TaskResult.Failed;
+        }
+    }
+}
+
+var activeJobs : Job[] = [];
 
 function trackJobQueued(queueUri: string) {
     tl.debug('Tracking progress of job queue: ' + queueUri);
@@ -70,30 +136,29 @@ function trackJobQueued(queueUri: string) {
                     trackJobQueued(queueUri);
                 }, captureConsolePollInterval);
             } else {
-                jenkinsTaskName = parsedBody.task.name;
-                jenkinsExecutableNumber = parsedBody.executable.number;
-                jenkinsExecutableUrl = parsedBody.executable.url;
-                console.log('Jenkins job started: ' + jenkinsExecutableUrl);
+                var job: Job = new Job(parsedBody.executable.url, parsedBody.executable.number,  parsedBody.task.name);
+                activeJobs.push(job);
+                console.log('Jenkins job started: ' + job.executableUrl);
 
                 if (captureConsole) {
                     // start capturing console
-                    captureJenkinsConsole(0);
+                    captureJenkinsConsole(job);
                 } else {
                     // no console option, just create link and finish
-                    createLinkAndFinish(tl.TaskResult.Succeeded, 'Queued', 'Jenkins job successfully queued: ' + jenkinsExecutableUrl);
+                    createLinkAndFinish(job);
                 }
             }
         }
     });
 }
 
-function createLinkAndFinish(result, jobStatus: string, resultMessage: string) {
+function createLinkAndFinish(job : Job) {
     var tempDir = shell.tempdir();
-    var linkMarkdownFile = path.join(tempDir, 'JenkinsJob_' + jenkinsTaskName + '_' + jenkinsExecutableNumber + '.md');
+    var linkMarkdownFile = path.join(tempDir, 'JenkinsJob_' + job.name + '_' + job.executableNumber + '.md');
     tl.debug('jenkinsLink: ' + linkMarkdownFile);
-    var summaryTitle = 'Jenkins ' + jenkinsTaskName + ' - ' + jenkinsExecutableNumber + ' - ' + jobStatus;
+    var summaryTitle = job.getSummaryTitle()
     tl.debug('summaryTitle: ' + summaryTitle);
-    var markdownContents = '[' + jenkinsExecutableUrl + '](' + jenkinsExecutableUrl + ')';
+    var markdownContents = '[' + job.executableUrl + '](' + job.executableUrl + ')';
     fs.writeFile(linkMarkdownFile, markdownContents, function callBack(err) {
         if (err) {
             //don't fail the build -- there just won't be a link
@@ -101,12 +166,12 @@ function createLinkAndFinish(result, jobStatus: string, resultMessage: string) {
         } else {
             console.log('##vso[task.addattachment type=Distributedtask.Core.Summary;name=' + summaryTitle + ';]' + linkMarkdownFile);
         }
-        tl.setResult(result, resultMessage);
+        tl.setResult(job.getTaskResult(), job.getCompletionMessage());
     });
 }
 
-function captureJenkinsConsole(consoleOffset: number) {
-    var fullUrl = jenkinsExecutableUrl + '/logText/progressiveText/?start=' + consoleOffset;
+function captureJenkinsConsole(job: Job) {
+    var fullUrl = job.executableUrl + '/logText/progressiveText/?start=' + job.jobConsoleOffset;
     tl.debug('Tracking progress of job URL: ' + fullUrl);
     request.get({ url: fullUrl }, function callBack(err, httpResponse, body) {
         if (err) {
@@ -114,41 +179,24 @@ function captureJenkinsConsole(consoleOffset: number) {
         } else if (httpResponse.statusCode != 200) {
             failReturnCode(httpResponse, 'Job progress tracking failed to read job progress');
         } else {
-            console.log(body); // redirect Jenkins console to task console
+            job.consoleLog(body); // redirect Jenkins console to task console
             var xMoreData = httpResponse.headers['x-more-data'];
             if (xMoreData && xMoreData == 'true') {
                 var offset = httpResponse.headers['x-text-size'];
+                job.jobConsoleOffset = offset;
                 // job still running so keep logging console
                 setTimeout(function () {
-                    captureJenkinsConsole(offset);
+                    captureJenkinsConsole(job);
                 }, captureConsolePollInterval);
             } else { // job is done -- did it succeed or not?
-                checkSuccess();
+                checkSuccess(job);
             }
         }
     });
 }
 
-function getResultString(resultCode: string): string {
-    // codes map to fields in http://hudson-ci.org/javadoc/hudson/model/Result.html
-    resultCode = resultCode.toUpperCase();
-    if (resultCode == 'SUCCESS') {
-        return 'Success';
-    } else if (resultCode == 'UNSTABLE') {
-        return 'Unstable';
-    } else if (resultCode == 'FAILURE') {
-        return 'Failure';
-    } else if (resultCode == 'NOT_BUILT') {
-        return 'Not built';
-    } else if (resultCode == 'ABORTED') {
-        return 'Aborted';
-    } else {
-        return resultCode;
-    }
-}
-
-function checkSuccess() {
-    var resultUrl = jenkinsExecutableUrl + 'api/json';
+function checkSuccess(job: Job) {
+    var resultUrl = job.executableUrl + 'api/json';
     tl.debug('Tracking completion status of job: ' + resultUrl);
     request.get({ url: resultUrl }, function callBack(err, httpResponse, body) {
         if (err) {
@@ -157,22 +205,15 @@ function checkSuccess() {
             failReturnCode(httpResponse, 'Job progress tracking failed to read job result');
         } else {
             var parsedBody = JSON.parse(body);
+            tl.debug("parsedBody for: "+resultUrl+ "\n" +JSON.stringify(parsedBody));
             var resultCode = parsedBody.result;
             if (resultCode) {
-                resultCode = resultCode.toUpperCase();
-                var resultStr = getResultString(resultCode);
-                tl.debug(resultUrl + ' resultCode: ' + resultCode + ' resultStr: ' + resultStr);
-                tl.debug("parsedBody for: "+resultUrl+ "\n" +JSON.stringify(parsedBody));
-                var completionMessage = 'Jenkins job: ' + resultCode + ' ' + jobName + ' ' + jenkinsExecutableUrl;
-                if (resultCode == "SUCCESS" || resultCode == 'UNSTABLE') {
-                    createLinkAndFinish(tl.TaskResult.Succeeded, resultStr, completionMessage);
-                } else {
-                    createLinkAndFinish(tl.TaskResult.Failed, resultStr, completionMessage);
-                }
+                job.setResult(resultCode);
+                createLinkAndFinish(job);
             } else {
                 // result not updated yet -- keep trying
                 setTimeout(function () {
-                    checkSuccess();
+                    checkSuccess(job);
                 }, captureConsolePollInterval);
             }
         }
