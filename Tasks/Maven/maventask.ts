@@ -7,14 +7,15 @@ import fs = require('fs');
 
 import tl = require('vsts-task-lib/task');
 import {ToolRunner} from 'vsts-task-lib/toolrunner';
-import sqCommon = require('sonarqube-common/sonarqube-common');
 
-// Lowercased file names are to lessen the likelihood of xplat issues
-import codeAnalysis = require('./CodeAnalysis/mavencodeanalysis');
+import sqCommon = require('sonarqube-common/sonarqube-common');
 import sqMaven = require('./CodeAnalysis/mavensonar');
 
+import {CodeAnalysisOrchestrator} from './CodeAnalysis/Common/CodeAnalysisOrchestrator';
+import {BuildOutput} from './CodeAnalysis/Common/BuildOutput';
+
 // Set up localization resource file
-tl.setResourcePath(path.join( __dirname, 'task.json'));
+tl.setResourcePath(path.join(__dirname, 'task.json'));
 
 var mavenPOMFile: string = tl.getPathInput('mavenPOMFile', true, true);
 var javaHomeSelection: string = tl.getInput('javaHomeSelection', true);
@@ -25,7 +26,7 @@ var publishJUnitResults: string = tl.getInput('publishJUnitResults');
 var testResultsFiles: string = tl.getInput('testResultsFiles', true);
 var ccTool = tl.getInput('codeCoverageTool');
 var isCodeCoverageOpted = (typeof ccTool != "undefined" && ccTool && ccTool.toLowerCase() != 'none');
-var isSonarQubeEnabled:boolean = false;
+var isPMDAnalysisEnabled: boolean = CodeAnalysisOrchestrator.IsPMDEnabled();
 
 // Determine the version and path of Maven to use
 var mvnExec: string = '';
@@ -154,6 +155,12 @@ mvnGetVersion.exec()
         // 2. Apply any goals for static code analysis tools selected by the user.
         mvnRun = sqMaven.applySonarQubeArgs(mvnRun, execFileJacoco);
         mvnRun = codeAnalysis.applyEnabledCodeAnalysisGoals(mvnRun);
+
+        if (isPMDAnalysisEnabled) {
+            console.log(tl.loc('codeAnalysis_ToolIsEnabled'), 'PMD');
+            mvnRun.arg('pmd:pmd');
+        }
+
 
         // Read Maven standard output
         mvnRun.on('stdout', function (data) {
