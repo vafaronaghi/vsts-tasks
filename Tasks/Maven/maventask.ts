@@ -122,7 +122,6 @@ else {
 // 1. Check that Maven exists by executing it to retrieve its version.
 // 2. Apply any goals for static code analysis tools selected by the user.
 // 3. Run Maven. Compilation or test errors will cause this to fail.
-//    In case the build has failed, the analysis will still succeed but the report will have less data. 
 // 4. Attempt to collate and upload static code analysis build summaries and artifacts.
 // 5. Always publish test results even if tests fail, causing this task to fail.
 // 6. If #3 or #4 above failed, exit with an error code to mark the entire step as failed.
@@ -154,13 +153,11 @@ mvnGetVersion.exec()
 
         // 2. Apply any goals for static code analysis tools selected by the user.
         mvnRun = sqMaven.applySonarQubeArgs(mvnRun, execFileJacoco);
-        mvnRun = codeAnalysis.applyEnabledCodeAnalysisGoals(mvnRun);
 
         if (isPMDAnalysisEnabled) {
             console.log(tl.loc('codeAnalysis_ToolIsEnabled'), 'PMD');
             mvnRun.arg('pmd:pmd');
         }
-
 
         // Read Maven standard output
         mvnRun.on('stdout', function (data) {
@@ -182,11 +179,8 @@ mvnGetVersion.exec()
             return;
         }
 
-        if (sqCommon.isSonarQubeAnalysisEnabled()) {
-            sqMaven.uploadSonarQubeBuildSummaryIfEnabled();
-        }
+        processCodeAnalysisResults();
 
-        codeAnalysis.uploadCodeAnalysisBuildSummaryIfEnabled();
     })
     .fail(function (err) {
         console.error(err.message);
@@ -211,6 +205,22 @@ mvnGetVersion.exec()
 
         // Do not force an exit as publishing results is async and it won't have finished 
     });
+
+function processCodeAnalysisResults() {
+
+    sqMaven.uploadSonarQubeBuildSummaryIfEnabled();
+
+    if (isPMDAnalysisEnabled) {
+        tl.debug('Processing code analysis results');
+        let buildOutput: BuildOutput = new BuildOutput(tl.getVariable('build.sourcesDirectory'), 'target');
+        let caOrchestrator: CodeAnalysisOrchestrator = new CodeAnalysisOrchestrator(
+            buildOutput,
+            path.join(tl.getVariable('build.artifactStagingDirectory'), ".codeAnalysis"),
+            tl.getVariable('build.buildNumber'));
+
+        caOrchestrator.orchestrateCodeAnalysisProcessing();
+    }
+}
 
 // Publishes JUnit test results from files matching the specified pattern.
 function publishJUnitTestResults(testResultsFiles: string) {

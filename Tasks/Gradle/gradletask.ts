@@ -127,8 +127,8 @@ function processCodeAnalysisResults() {
     if (isSonarQubeEnabled) {
         sqGradle.uploadSonarQubeBuildSummary();
     }
-
 }
+
 /* Functions for Publish Test Results, Code Coverage */
 function publishTestResults(publishJUnitResults, testResultsFiles: string) {
     if (publishJUnitResults) {
