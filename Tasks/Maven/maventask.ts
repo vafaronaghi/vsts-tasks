@@ -12,7 +12,7 @@ import sqCommon = require('sonarqube-common/sonarqube-common');
 import sqMaven = require('./CodeAnalysis/mavensonar');
 
 import {CodeAnalysisOrchestrator} from './CodeAnalysis/Common/CodeAnalysisOrchestrator';
-import {BuildOutput} from './CodeAnalysis/Common/BuildOutput';
+import {BuildOutput, BuildEngine} from './CodeAnalysis/Common/BuildOutput';
 
 // Set up localization resource file
 tl.setResourcePath(path.join(__dirname, 'task.json'));
@@ -212,7 +212,7 @@ function processCodeAnalysisResults() {
 
     if (isPMDAnalysisEnabled) {
         tl.debug('Processing code analysis results');
-        let buildOutput: BuildOutput = new BuildOutput(tl.getVariable('build.sourcesDirectory'), 'target');
+        let buildOutput: BuildOutput = new BuildOutput(tl.getVariable('build.sourcesDirectory'), BuildEngine.Maven);
         let caOrchestrator: CodeAnalysisOrchestrator = new CodeAnalysisOrchestrator(
             buildOutput,
             path.join(tl.getVariable('build.artifactStagingDirectory'), ".codeAnalysis"),

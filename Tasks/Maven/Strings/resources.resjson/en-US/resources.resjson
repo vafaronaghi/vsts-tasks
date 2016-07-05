@@ -64,5 +64,7 @@
   "loc.messages.codeAnalysisBuildSummaryLine_SomeViolationsSomeFiles": "%s found %d violations in %d files.",
   "loc.messages.codeAnalysisBuildSummaryLine_SomeViolationsOneFile": "%s found %d violations in 1 file.",
   "loc.messages.codeAnalysisBuildSummaryLine_OneViolationOneFile": "%s found 1 violation in 1 file.",
-  "loc.messages.codeAnalysisBuildSummaryLine_NoViolations": "%s found no violations."
+  "loc.messages.codeAnalysisBuildSummaryLine_NoViolations": "%s found no violations.",
+  "loc.messages.codeAnalysisBuildSummaryTitle": "Code Analysis Report",
+  "loc.messages.codeAnalysisArtifactSummaryTitle": "Code Analysis Results"
 }
