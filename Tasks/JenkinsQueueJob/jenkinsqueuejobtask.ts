@@ -83,6 +83,7 @@ class Job {
 
     doneJson;
     resultCode: string;
+    parsedTaskBody;
 
     constructor(parent: Job, taskUrl: string, executableUrl: string, executableNumber: number, name: string) {
         this.parentJob = parent;
@@ -90,6 +91,8 @@ class Job {
         this.executableUrl = executableUrl;
         this.executableNumber = executableNumber;
         this.name = name;
+        this.debug('created');
+        
         executableUrl != null ? this.setRunning(executableNumber) : this.setUnknown();
         if (parent == null) {
             // no parent means this is the root job, so queue the console.
@@ -98,22 +101,19 @@ class Job {
     }
 
     toString() {
-        var fullMessage = 'Job: ' + this.name + ':' + this.executableNumber + ', parentJob:(';
-        if (this.parentJob == null) {
-            fullMessage += 'none)';
-        } else {
-            fullMessage += this.parentJob + ')';
+        var fullMessage = '(Job:' + this.name + ':' + this.executableNumber;
+        if (this.parentJob != null) {
+            fullMessage += ', parentJob:' + this.parentJob;
         }
         if (this.joinedJob != null) {
-            fullMessage += ', joinedJob:(' + this.joinedJob + ')';
+            fullMessage += ', joinedJob:' + this.joinedJob;
         }
-
-        fullMessage += ' state: ' + this.state;
+        fullMessage += ', state:' + this.state + ')';
         return fullMessage;
     }
 
     debug(message: string) {
-        var fullMessage = toString() + ' debug: ' + message;
+        var fullMessage = this.toString() + ' debug: ' + message;
         tl.debug(fullMessage);
     }
 
@@ -147,7 +147,7 @@ class Job {
         this.executableUrl = addUrlSegment(this.taskUrl, this.executableNumber.toString());
         var debugPreviousState = this.state;
         this.state = 'running';
-        this.debug(' state changed from: ' + debugPreviousState);
+        this.debug('state changed from: ' + debugPreviousState);
 
         captureJenkinsConsole(this);
         this.consoleLog('******************************************************************************\n');
@@ -163,7 +163,7 @@ class Job {
     setDone(doneJson) {
         var debugPreviousState = this.state;
         this.state = 'done';
-        this.debug(' state changed from: ' + debugPreviousState);
+        this.debug('state changed from: ' + debugPreviousState);
 
         this.doneJson = doneJson;
         this.consoleLog('******************************************************************************\n');
@@ -180,7 +180,7 @@ class Job {
         this.joinedJob = joinedJob;
         var debugPreviousState = this.state;
         this.state = 'joined';
-        this.debug(' state changed from: ' + debugPreviousState);
+        this.debug('state changed from: ' + debugPreviousState);
     }
 
     isJoined(): boolean {
@@ -237,19 +237,23 @@ class Job {
     }
 
     getJobTask(getTaskCallback) {
-        var apiTaskUrl = addUrlSegment(this.taskUrl, "/api/json");
-        this.debug('getting job task URL:' + apiTaskUrl);
-        return request.get({ url: apiTaskUrl }, function requestCallBack(err, httpResponse, body) {
-            if (err) {
-                tl.setResult(tl.TaskResult.Failed, err);
-            } else if (httpResponse.statusCode != 200) {
-                failReturnCode(httpResponse, 'Unable to retrieve job: ' + this.name);
-            } else {
-                var parsedBody = JSON.parse(body);
-                this.debug("parsedBody for: " + apiTaskUrl + ": " + JSON.stringify(parsedBody));
-                getTaskCallback(parsedBody);
-            }
-        });
+        if (this.parsedTaskBody) { // already retrieved
+            getTaskCallback(this.parsedTaskBody);
+        } else {
+            var apiTaskUrl = addUrlSegment(this.taskUrl, "/api/json");
+            this.debug('getting job task URL:' + apiTaskUrl);
+            return request.get({ url: apiTaskUrl }, function requestCallBack(err, httpResponse, body) {
+                if (err) {
+                    tl.setResult(tl.TaskResult.Failed, err);
+                } else if (httpResponse.statusCode != 200) {
+                    failReturnCode(httpResponse, 'Unable to retrieve job: ' + this.name);
+                } else {
+                    this.parsedTaskBody = JSON.parse(body);
+                    this.debug("parsedBody for: " + apiTaskUrl + ": " + JSON.stringify(this.parsedTaskBody));
+                    getTaskCallback(this.parsedTaskBody);
+                }
+            });
+        }
     }
 }
 
@@ -286,7 +290,7 @@ function findJob(name: string, executableNumber: number): Job {
     return null;
 }
 
-function joinJobs(parentJob: Job, joinToJob: Job) : void {
+function joinJobs(parentJob: Job, joinToJob: Job): void {
     for (var i in jobs) {
         var job = jobs[i];
         if (job.parentJob == parentJob && job != joinToJob) {
@@ -383,10 +387,10 @@ function locateChildExecution(job: Job) {
     job.getJobTask(function callBack(parsedBody) {
         if (parsedBody.inQueue) { // if it's in the queue, start checking with the next build number
             job.initialSearchBuildNumber = parsedBody.nextBuildNumber;
-            console.log(job + 'in queue');
+            console.log(job + ' in queue');
         } else { // otherwise, check with the last build number.
             job.initialSearchBuildNumber = parsedBody.lastBuild.number;
-            console.log(job + 'not in queue');
+            console.log(job + ' not in queue');
         }
         locateChildExecutionBuildNumber(job, job.initialSearchBuildNumber, -1);
     });
@@ -400,8 +404,7 @@ function locateChildExecution(job: Job) {
  * are queued.  At any point, the search also ends if the job is joined to another job.
  */
 function locateChildExecutionBuildNumber(job: Job, buildNumberToCheck: number, directionToSearch: number) {
-    if (job.isJoined()) {
-        //some other thread found and joined it.
+    if (!job.isUnknown()) {
         return;
     }
     var url = addUrlSegment(job.taskUrl, buildNumberToCheck + "/api/json");
@@ -420,8 +423,9 @@ function locateChildExecutionBuildNumber(job: Job, buildNumberToCheck: number, d
                     setTimeout(function () {
                         locateChildExecutionBuildNumber(job, buildNumberToCheck, directionToSearch);
                     }, captureConsolePollInterval);
-                } else {
+                } else if (job.isUnknown()) {
                     job.debug('job is not queued, end search');
+                    console.log(job + ' can not be found.');
                     console.log('Warning: Job: ' + job.name + " queued by Job: " + job.parentJob.name + ": " + job.parentJob.executableUrl + " can not be found.");
                 }
             });
@@ -455,7 +459,7 @@ function locateChildExecutionBuildNumber(job: Job, buildNumberToCheck: number, d
                 joinJobs(parentJob, job);
             }
 
-            if (job.isRunning() || job.isDone() || job.isJoined()) {
+            if (!job.isUnknown()) {
                 //could have been started/finished above, or joined by another thread
                 return;
             }
