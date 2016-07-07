@@ -24,7 +24,7 @@ var password = serverEndpointAuth['parameters']['password'];
 var jobName = tl.getInput('jobName', true);
 
 var captureConsole = tl.getBoolInput('captureConsole', true);
-var captureConsolePollInterval = 5000; // five seconds is what the Jenkins Web UI uses
+var pollInterval = 5000; // five seconds is what the Jenkins Web UI uses
 
 // capturePipeline is only possible if captureConsole mode is enabled
 var capturePipeline = captureConsole ? tl.getBoolInput('capturePipeline', true) : false;
@@ -36,6 +36,7 @@ jobQueueUrl += (parameterizedJob) ? '/buildWithParameters?delay=0sec' : '/build?
 tl.debug('jobQueueUrl=' + jobQueueUrl);
 
 function addUrlSegment(baseUrl: string, segment: string): string {
+    tl.debug('addUrlSegment');
     var resultUrl = null;
     if (baseUrl.endsWith('/') && segment.startsWith('/')) {
         resultUrl = baseUrl + segment.slice(1);
@@ -44,15 +45,17 @@ function addUrlSegment(baseUrl: string, segment: string): string {
     } else {
         resultUrl = baseUrl + '/' + segment;
     }
-    //console.log('addUrlSegment baseUrl: ' + baseUrl + ' segment: ' + segment + ' resultUrl: ' + resultUrl);
+    //tl.debug('addUrlSegment baseUrl: ' + baseUrl + ' segment: ' + segment + ' resultUrl: ' + resultUrl);
     return resultUrl;
 }
 
 function failError(err): void {
+    tl.debug('failError');
     fail(err);
 }
 
 function failReturnCode(httpResponse, message: string): void {
+    tl.debug('failReturnCode');
     var fullMessage = message +
         '\nHttpResponse.statusCode=' + httpResponse.statusCode +
         '\nHttpResponse.statusMessage=' + httpResponse.statusMessage +
@@ -61,20 +64,22 @@ function failReturnCode(httpResponse, message: string): void {
 }
 
 function fail(message: string): void {
+    tl.debug('fail');
     tl.debug(message);
     tl.setResult(tl.TaskResult.Failed, message);
     tl.exit(1);
 }
 
 enum JobState {
-    New = 0,
-    Locating = 1,
-    LocatingNotFound = 2,
-    Streaming = 3,
-    Finishing = 4,
-    Done = 5,
-    Joined = 6,
-    Queued = 7
+    New,
+    Locating,
+    LocatingNotFound,
+    Streaming,
+    Finishing,
+    Done,
+    Joined,
+    Queued,
+    Lost
 }
 
 class Job {
@@ -106,6 +111,7 @@ class Job {
     parsedExecutionResult; // set during state Finishing
 
     constructor(parent: Job, taskUrl: string, executableUrl: string, executableNumber: number, name: string) {
+        tl.debug('new job');
         this.parentJob = parent;
         this.taskUrl = taskUrl;
         this.executableUrl = executableUrl;
@@ -121,49 +127,66 @@ class Job {
         } else {
             this.debug('starting work');
             this.working = true;
-            if (this.state == JobState.New) {
-                if (this.parentJob == null) { // root job, can skip Locating
-                    if (captureConsole) {
-                        this.enableConsoleLog();
-                        this.setStreaming(this.executableNumber); // jump to Streaming
+            setTimeout(() => {
+                tl.debug('doWork().setTimeout()');
+                if (this.state == JobState.New) {
+                    if (this.parentJob == null) { // root job, can skip Locating
+                        if (captureConsole) {
+                            this.enableConsole();
+                            this.setStreaming(this.executableNumber); // jump to Streaming
+                        } else {
+                            this.changeState(JobState.Finishing); // also skip Streaming and jump to Finishing
+                        }
                     } else {
-                        this.changeState(JobState.Queued); // also skip Streaming and jump to Queued
+                        this.changeState(JobState.Locating); // pipeline jobs
                     }
+                    this.initializeNewJob();
+                } else if (this.state == JobState.Locating || this.state == JobState.LocatingNotFound) {
+                    locateChildExecutionBuildNumber(this);
+                } else if (JobState.Streaming == this.state) {
+                    streamConsole(this);
+                } else if (JobState.Finishing == this.state) {
+                    finish(this);
                 } else {
-                    this.changeState(JobState.Locating); // pipeline jobs
+                    // non active states, should not be in here
+                    tl.debug(this + 'should not be in doWork()');
+                    this.stopWork(0, null);
                 }
-                this.initializeNewJob();
-            } else if (this.state == JobState.Locating || this.state == JobState.LocatingNotFound) {
-                locateChildExecutionBuildNumber(this);
-            } else if (JobState.Streaming == this.state) {
-                streamConsole(this);
-            } else if (JobState.Finishing == this.state) {
-                checkSuccess(this);
-            } else if (this.state == JobState.Done || this.state == JobState.Joined || this.state == JobState.Queued) {
-                //should not be in here
-                console.log(this + 'should not be in doWork()');
-                this.working = false;
-            }
+            }, this.workDelay);
         }
     }
 
+    stopWork(delay: number, jobState: JobState) {
+        tl.debug('job.stopWork()');
+        if (jobState && jobState != this.state) {
+            this.changeState(jobState);
+        }
+        this.workDelay = delay;
+        this.working = false;
+    }
+
     changeState(newState: JobState) {
+        tl.debug('job.changeState()');
         this.state = newState;
         this.debug('state changed');
     }
 
     getState(): JobState {
+        tl.debug('job.getState()');
         return this.state;
     }
 
     isActive(): boolean {
+        tl.debug('job.isActive()');
         return this.state == JobState.New ||
             this.state == JobState.Locating ||
+            this.state == JobState.LocatingNotFound ||
             this.state == JobState.Streaming ||
             this.state == JobState.Finishing
     }
 
     setStreaming(executableNumber: number): void {
+        tl.debug('job.setStreaming()');
         this.executableNumber = executableNumber;
         this.executableUrl = addUrlSegment(this.taskUrl, this.executableNumber.toString());
         this.changeState(JobState.Streaming);
@@ -172,9 +195,14 @@ class Job {
         this.consoleLog('Jenkins job started: ' + this.name + '\n');
         this.consoleLog(this.executableUrl + '\n');
         this.consoleLog('******************************************************************************\n');
+
+        if (jobQueue.findActiveConsoleJob() == null) {
+            console.log('Jenkins job pending: ' + this.executableUrl);
+        }
     }
 
     setParsedExecutionResult(parsedExecutionResult) {
+        tl.debug('job.setParsedExecutionResult');
         this.parsedExecutionResult = parsedExecutionResult;
         this.consoleLog('******************************************************************************\n');
         this.consoleLog('Jenkins job finished: ' + this.name + '\n');
@@ -183,22 +211,26 @@ class Job {
     }
 
     setJoined(joinedJob: Job): void {
+        tl.debug('job.setJoined()');
         this.joinedJob = joinedJob;
         this.changeState(JobState.Joined);
     }
 
-    getCompletionMessage(): string {
-        return 'Jenkins job: ' + this.getResultString() + ' ' + this.name + ' ' + this.executableUrl;
+    getCompletionMessage(finalJobState: JobState): string {
+        tl.debug('job.getCompletionMessage()');
+        return 'Jenkins job: ' + this.getResultString(finalJobState) + ' ' + this.name + ' ' + this.executableUrl;
     }
 
-    getSummaryTitle() {
-        return 'Jenkins ' + this.name + ' - ' + this.executableNumber + ' - ' + this.getResultString();
+    getSummaryTitle(finalJobState: JobState) {
+        tl.debug('job.getSummaryTitle()');
+        return 'Jenkins ' + this.name + ' - ' + this.executableNumber + ' - ' + this.getResultString(finalJobState);
     }
 
-    getResultString(): string {
-        if (this.state == JobState.Queued) {
+    getResultString(finalJobState: JobState): string {
+        tl.debug('job.getResultString()');
+        if (finalJobState == JobState.Queued) {
             return 'Queued';
-        } else if (this.state == JobState.Done) {
+        } else if (finalJobState == JobState.Done) {
             var resultCode = this.parsedExecutionResult.result.toUpperCase();
             // codes map to fields in http://hudson-ci.org/javadoc/hudson/model/Result.html
             if (resultCode == 'SUCCESS') {
@@ -217,10 +249,11 @@ class Job {
         } else return 'Unknown';
     }
 
-    getTaskResult(): number {
-        if (this.state == JobState.Queued) {
+    getTaskResult(finalJobState: JobState): number {
+        tl.debug('job.getTaskResult()');
+        if (finalJobState == JobState.Queued) {
             return tl.TaskResult.Succeeded;
-        } else if (this.state == JobState.Done) {
+        } else if (finalJobState == JobState.Done) {
             var resultCode = this.parsedExecutionResult.result.toUpperCase();
             if (resultCode == "SUCCESS" || resultCode == 'UNSTABLE') {
                 return tl.TaskResult.Succeeded;
@@ -231,44 +264,57 @@ class Job {
         return tl.TaskResult.Failed;
     }
 
-    refreshJobTask(callback) {
+    refreshJobTask(job, callback) {
+        tl.debug('job.refreshJobTask()');
         var apiTaskUrl = addUrlSegment(this.taskUrl, "/api/json");
         this.debug('getting job task URL:' + apiTaskUrl);
         return request.get({ url: apiTaskUrl }, function requestCallBack(err, httpResponse, body) {
+            tl.debug('job.refreshJobTask().requestCallBack()');
             if (err) {
                 failError(err);
             } else if (httpResponse.statusCode != 200) {
                 failReturnCode(httpResponse, 'Unable to retrieve job: ' + this.name);
             } else {
-                this.parsedTaskBody = JSON.parse(body);
-                this.debug("parsedBody for: " + apiTaskUrl + ": " + JSON.stringify(this.parsedTaskBody));
-                callback(this.parsedTaskBody);
+                job.parsedTaskBody = JSON.parse(body);
+                job.debug("parsedBody for: " + apiTaskUrl + ": " + JSON.stringify(job.parsedTaskBody));
+                callback();
             }
         });
     }
 
     initializeNewJob() {
-        this.refreshJobTask(function callback(parsedTaskBody) {
-            if (this.parsedTaskBody.inQueue) { // if it's in the queue, start checking with the next build number
-                this.initialSearchBuildNumber = this.parsedTaskBody.nextBuildNumber;
+        tl.debug('job.initializeNewJob()');
+        var job = this;
+        this.refreshJobTask(this, function callback() {
+            tl.debug('job.initializeNewJob().classback()');
+            if (job.parsedTaskBody.inQueue) { // if it's in the queue, start checking with the next build number
+                job.initialSearchBuildNumber = job.parsedTaskBody.nextBuildNumber;
             } else { // otherwise, check with the last build number.
-                this.initialSearchBuildNumber = this.parsedBody.lastBuild.number;
+                job.initialSearchBuildNumber = job.parsedTaskBody.lastBuild.number;
             }
-            this.workDelay = 0;
-            this.working = false;
+            job.nextSearchBuildNumber = job.initialSearchBuildNumber;
+            job.stopWork(0, job.state);
         });
     }
 
-    enableConsoleLog() {
-        if (!this.jobConsoleEnabled) {
-            if (this.jobConsole != "") { // log any queue output
-                console.log(this.jobConsole);
+    enableConsole() {
+        tl.debug('job.enableConsoleLog()');
+        if (captureConsole) {
+            if (!this.jobConsoleEnabled) {
+                if (this.jobConsole != "") { // flush any queued output
+                    console.log(this.jobConsole);
+                }
+                this.jobConsoleEnabled = true;
             }
-            this.jobConsoleEnabled = true;
         }
     }
 
+    isConsoleEnabled() {
+        return this.jobConsoleEnabled;
+    }
+
     consoleLog(message: string) {
+        tl.debug('job.console()');
         if (this.jobConsoleEnabled) {
             //only log it if the console is enabled.
             console.log(message);
@@ -298,25 +344,35 @@ class JobQueue {
     jobs: Job[] = [];
 
     constructor(rootJob: Job) {
+        tl.debug('new JobQueue');
         this.jobs.push(rootJob);
         this.start();
     }
 
+    intervalId
+    intervalMillis: number = 1000;
+
     start(): void {
-        //while (true) { // run until all jobs are finished
-            for (var i in this.jobs) {
-                var job = this.jobs[i];
-                if (job.isActive()) {
+        tl.debug('jobQueue.start()');
+
+        this.intervalId = setInterval(() => {
+            tl.debug('jobQueue.setInterval()');
+            var activeJobs: Job[] = this.getActiveJobs();
+            if (activeJobs.length == 0) {
+                this.stop();
+            } else {
+                activeJobs.forEach((job) => {
                     job.doWork();
-                }
+                });
+                this.flushJobConsolesSafely();
             }
-            if (this.countRemainingJobs() == 0) {
-                return this.stop();
-            }
-        //}
+        }, this.intervalMillis);
     }
 
     stop(): void {
+        tl.debug('jobQueue.stop()');
+        clearInterval(this.intervalId);
+        this.flushJobConsolesSafely();
         var message: string = null;
         if (capturePipeline) {
             message = 'Jenkins pipeline complete';
@@ -330,30 +386,68 @@ class JobQueue {
     }
 
     queue(job: Job): void {
+        tl.debug('jobQueue.queue()');
+
         this.jobs.push(job);
     }
 
-    countRemainingJobs(): number {
-        var count: number = 0;
+    getActiveJobs(): Job[] {
+        var activeJobs: Job[] = [];
+
         for (var i in this.jobs) {
             var job = this.jobs[i];
             if (job.isActive()) {
-                count++;
+                activeJobs.push(job);
             }
         }
-        return count;
+
+        return activeJobs;
     }
 
-    flushJobConsolesIfDone(): void {
-        for (var i in this.jobs) {
-            var job = this.jobs[i];
-            if (job.getState() == JobState.Done) {
-                job.enableConsoleLog();
+    flushJobConsolesSafely(): void {
+        if (this.findActiveConsoleJob() == null) { //nothing is currently writing to the console
+            var streamingJobs: Job[] = [];
+            var addedToConsole: boolean = false;
+            for (var i in this.jobs) {
+                var job = this.jobs[i];
+                if (job.getState() == JobState.Done) {
+                    if (!job.isConsoleEnabled()) {
+                        job.enableConsole(); // flush the finished ones
+                        addedToConsole = true;
+                    }
+                } else if (job.getState() == JobState.Streaming || job.getState() == JobState.Finishing) {
+                    streamingJobs.push(job); // these are the ones that could be running
+                }
+            }
+            // finally, if there is only one remaining, it is safe to enable its console
+            if (streamingJobs.length == 1) {
+                streamingJobs[0].enableConsole();
+            } else if (addedToConsole) {
+                for (var i in streamingJobs) {
+                    var job = streamingJobs[i];
+                    console.log('Jenkins job pending: ' + job.executableUrl);
+                }
             }
         }
+    }
+
+    /**
+     * If there is a job currently writing to the console, find it.
+     */
+    findActiveConsoleJob(): Job {
+        var activeJobs: Job[] = this.getActiveJobs();
+        for (var i in activeJobs) {
+            var job = activeJobs[i];
+            if (job.isConsoleEnabled()) {
+                return job;
+            }
+        }
+        return null;
     }
 
     findJob(name: string, executableNumber: number): Job {
+        tl.debug('jobQueue.findJob()');
+
         for (var i in this.jobs) {
             var job = this.jobs[i];
             if (job.name == name && job.executableNumber == executableNumber) {
@@ -364,6 +458,8 @@ class JobQueue {
     }
 
     joinJobs(parentJob: Job, joinToJob: Job): void {
+        tl.debug('jobQueue.joinJobs()');
+
         for (var i in this.jobs) {
             var job = this.jobs[i];
             if (job.parentJob == parentJob && job != joinToJob) {
@@ -373,67 +469,43 @@ class JobQueue {
     }
 }
 
-var jobQueue;
+var jobQueue: JobQueue;
 
-function trackJobQueued(queueUri: string) {
-    tl.debug('Tracking progress of job queue: ' + queueUri);
-    request.get({ url: queueUri }, function callBack(err, httpResponse, body) {
-        if (err) {
-            failError(err);
-        } else if (httpResponse.statusCode != 200) {
-            failReturnCode(httpResponse, 'Job progress tracking failed to read job queue');
-        } else {
-            var parsedBody = JSON.parse(body);
-            tl.debug("parsedBody for: " + queueUri + ": " + JSON.stringify(parsedBody));
+function createLinkAndFinish(job: Job, finalJobState: JobState) {
+    tl.debug('createLinkAndFinish()');
 
-            // canceled is spelled wrong in the body with 2 Ls (checking correct spelling also in case they fix it)
-            if (parsedBody.cancelled || parsedBody.canceled) {
-                tl.setResult(tl.TaskResult.Failed, 'Jenkins job canceled.');
-                tl.exit(1);
-            }
-            var executable = parsedBody.executable;
-            if (!executable) {
-                // job has not actually been queued yet, keep checking
-                setTimeout(function () {
-                    trackJobQueued(queueUri);
-                }, captureConsolePollInterval);
-            } else {
-                var rootJob: Job = new Job(null, parsedBody.task.url, parsedBody.executable.url, parsedBody.executable.number, parsedBody.task.name);
-                jobQueue = new JobQueue(rootJob);
-            }
-        }
-    });
-}
-
-function createLinkAndFinish(job: Job) {
     var tempDir = shell.tempdir();
     var linkMarkdownFile = path.join(tempDir, 'JenkinsJob_' + job.name + '_' + job.executableNumber + '.md');
     job.debug('jenkinsLink: ' + linkMarkdownFile);
-    var summaryTitle = job.getSummaryTitle()
+    var summaryTitle = job.getSummaryTitle(finalJobState);
     job.debug('summaryTitle: ' + summaryTitle);
     var markdownContents = '[' + job.executableUrl + '](' + job.executableUrl + ')';
 
     fs.writeFile(linkMarkdownFile, markdownContents, function callBack(err) {
+        tl.debug('createLinkAndFinish().writeFile().callback()');
+
         if (err) {
             //don't fail the build -- there just won't be a link
             job.consoleLog('Error creating link to Jenkins job: ' + err);
         } else {
             job.consoleLog('##vso[task.addattachment type=Distributedtask.Core.Summary;name=' + summaryTitle + ';]' + linkMarkdownFile);
         }
+
         //if capturing the pipeline and this job succeeded, search for downstream jobs 
-        if (capturePipeline && job.getTaskResult() == tl.TaskResult.Succeeded) {
+        if (capturePipeline && job.getTaskResult(finalJobState) == tl.TaskResult.Succeeded) {
             var downstreamProjects = job.parsedTaskBody.downstreamProjects;
             // each of these runs in parallel
             downstreamProjects.forEach((project) => {
                 var child: Job = new Job(job, project.url, null, -1, project.name);
                 jobQueue.queue(child);
             });
-            job.changeState(JobState.Done);
-            job.working = false;
         } else {
-            tl.setResult(job.getTaskResult(), job.getCompletionMessage());
-            tl.exit(1);
+            var taskResult = job.getTaskResult(finalJobState);
+            tl.setResult(taskResult, job.getCompletionMessage(finalJobState));
+            tl.exit(taskResult == tl.TaskResult.Succeeded ? 0 : 1);
         }
+        jobQueue.flushJobConsolesSafely();
+        job.stopWork(0, finalJobState);
     });
 }
 
@@ -445,25 +517,28 @@ function createLinkAndFinish(job: Job) {
  * are queued.  At any point, the search also ends if the job is joined to another job.
  */
 function locateChildExecutionBuildNumber(job: Job) {
+    tl.debug('locateChildExecutionBuildNumber()');
+
     var url = addUrlSegment(job.taskUrl, job.nextSearchBuildNumber + "/api/json");
     job.debug('pipeline, locating child execution URL:' + url);
-    request.get({ url: url }, function callBack(err, httpResponse, body) {
+    request.get({ url: url }, function requestCallback(err, httpResponse, body) {
+        tl.debug('locateChildExecutionBuildNumber().requestCallback()');
+
         if (err) {
             failError(err);
         } else if (httpResponse.statusCode == 404) {
             // This job doesn't exist -- do we expect it to in the near future because it has been queued?
             job.debug('404 for: ' + job.name + ':' + job.nextSearchBuildNumber);
             job.debug('checking if it is in the queue');
-            job.refreshJobTask(function callback(parsedJobTaskBody) {
-                if (parsedJobTaskBody.inQueue || parsedJobTaskBody.lastCompletedBuild >= job.nextSearchBuildNumber) {
+            job.refreshJobTask(job, function refreshJobTaskCallback() {
+                tl.debug('locateChildExecutionBuildNumber().requestCallback().refreshJobTaskCallback()');
+
+                if (job.parsedTaskBody.inQueue || job.parsedTaskBody.lastCompletedBuild >= job.nextSearchBuildNumber) {
                     //see if it's in the queue, or maybe it just ran right after we first checked
                     job.debug('job has been queued, continue searching');
-                    job.workDelay = captureConsolePollInterval;
-                    job.working = false;
+                    job.stopWork(pollInterval, JobState.LocatingNotFound);
                 } else {
-                    job.debug('job is not queued, end search');
-                    console.log(job + ' can not be found.');
-                    console.log('Warning: Job: ' + job.name + " queued by Job: " + job.parentJob.name + ": " + job.parentJob.executableUrl + " can not be found.");
+                    job.stopWork(pollInterval, JobState.Lost);
                 }
             });
         } else if (httpResponse.statusCode != 200) {
@@ -515,8 +590,7 @@ function locateChildExecutionBuildNumber(job: Job) {
                     job.nextSearchBuildNumber++;
                 }
             }
-            job.workDelay = 0;
-            job.working = false;
+            job.stopWork(0, job.state);
         }
     });
 }
@@ -527,9 +601,11 @@ function locateChildExecutionBuildNumber(job: Job) {
  * JobState = Streaming, transition to Finishing possible.
  */
 function streamConsole(job: Job) {
+    tl.debug('streamConsole()');
     var fullUrl = addUrlSegment(job.executableUrl, '/logText/progressiveText/?start=' + job.jobConsoleOffset);
     job.debug('Tracking progress of job URL: ' + fullUrl);
-    request.get({ url: fullUrl }, function callBack(err, httpResponse, body) {
+    request.get({ url: fullUrl }, function requestCallback(err, httpResponse, body) {
+        tl.debug('streamConsole().requestCallback()');
         if (err) {
             failError(err);
         } else if (httpResponse.statusCode != 200) {
@@ -540,12 +616,9 @@ function streamConsole(job: Job) {
             if (xMoreData && xMoreData == 'true') {
                 var offset = httpResponse.headers['x-text-size'];
                 job.jobConsoleOffset = offset;
-                job.workDelay = captureConsolePollInterval;
-                job.working = false;
-            } else { // job is done -- did it succeed or not?
-                job.workDelay = 0;
-                job.changeState(JobState.Finishing);
-                job.working = false;
+                job.stopWork(pollInterval, job.state);
+            } else { // no more console, move to Finishing
+                job.stopWork(0, JobState.Finishing);
             }
         }
     });
@@ -553,30 +626,68 @@ function streamConsole(job: Job) {
 /**
  * Checks the success of the job
  * 
- * JobState = Finishing, transition to Done possible
+ * JobState = Finishing, transition to Done or Queued possible
  */
-function checkSuccess(job: Job) {
-    var resultUrl = addUrlSegment(job.executableUrl, 'api/json');
-    job.debug('Tracking completion status of job: ' + resultUrl);
-    request.get({ url: resultUrl }, function callBack(err, httpResponse, body) {
+function finish(job: Job) {
+    tl.debug('finish()');
+    if (!captureConsole) { // transition to Queued
+        createLinkAndFinish(job, JobState.Queued);
+    } else { // stay in Finishing, or eventually go to Done
+        var resultUrl = addUrlSegment(job.executableUrl, 'api/json');
+        job.debug('Tracking completion status of job: ' + resultUrl);
+        request.get({ url: resultUrl }, function requestCallback(err, httpResponse, body) {
+            tl.debug('finish().requestCallback()');
+            if (err) {
+                fail(err);
+            } else if (httpResponse.statusCode != 200) {
+                failReturnCode(httpResponse, 'Job progress tracking failed to read job result');
+            } else {
+                var parsedBody = JSON.parse(body);
+                job.debug("parsedBody for: " + resultUrl + ": " + JSON.stringify(parsedBody));
+                if (parsedBody.result) {
+                    job.setParsedExecutionResult(parsedBody);
+                    createLinkAndFinish(job, JobState.Done);
+                } else {
+                    // result not updated yet -- keep trying
+                    job.stopWork(pollInterval, job.state);
+                }
+            }
+        });
+    }
+}
+
+function trackJobQueued(queueUri: string) {
+    tl.debug('trackJobQueued()');
+    tl.debug('Tracking progress of job queue: ' + queueUri);
+    request.get({ url: queueUri }, function requestCallback(err, httpResponse, body) {
+        tl.debug('trackJobQueued().requestCallback()');
         if (err) {
-            fail(err);
+            failError(err);
         } else if (httpResponse.statusCode != 200) {
-            failReturnCode(httpResponse, 'Job progress tracking failed to read job result');
+            failReturnCode(httpResponse, 'Job progress tracking failed to read job queue');
         } else {
             var parsedBody = JSON.parse(body);
-            job.debug("parsedBody for: " + resultUrl + ": " + JSON.stringify(parsedBody));
-            if (parsedBody.result) {
-                job.setParsedExecutionResult(parsedBody);
-                createLinkAndFinish(job);
+            tl.debug("parsedBody for: " + queueUri + ": " + JSON.stringify(parsedBody));
+
+            // canceled is spelled wrong in the body with 2 Ls (checking correct spelling also in case they fix it)
+            if (parsedBody.cancelled || parsedBody.canceled) {
+                tl.setResult(tl.TaskResult.Failed, 'Jenkins job canceled.');
+                tl.exit(1);
+            }
+            var executable = parsedBody.executable;
+            if (!executable) {
+                // job has not actually been queued yet, keep checking
+                setTimeout(function () {
+                    trackJobQueued(queueUri);
+                }, pollInterval);
             } else {
-                // result not updated yet -- keep trying
-                job.workDelay = captureConsolePollInterval;
-                job.working = false;
+                var rootJob: Job = new Job(null, parsedBody.task.url, parsedBody.executable.url, parsedBody.executable.number, parsedBody.task.name);
+                jobQueue = new JobQueue(rootJob);
             }
         }
     });
 }
+
 
 /**
  * Supported parameter types: boolean, string, choice, password
