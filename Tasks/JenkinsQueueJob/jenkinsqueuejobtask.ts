@@ -48,6 +48,10 @@ function addUrlSegment(baseUrl: string, segment: string): string {
     return resultUrl;
 }
 
+function failError(err): void {
+    fail(err);
+}
+
 function failReturnCode(httpResponse, message: string): void {
     var fullMessage = message +
         '\nHttpResponse.statusCode=' + httpResponse.statusCode +
@@ -59,12 +63,26 @@ function failReturnCode(httpResponse, message: string): void {
 function fail(message: string): void {
     tl.debug(message);
     tl.setResult(tl.TaskResult.Failed, message);
+    tl.exit(1);
+}
+
+enum JobState {
+    New = 0,
+    Locating = 1,
+    LocatingNotFound = 2,
+    Streaming = 3,
+    Finishing = 4,
+    Done = 5,
+    Joined = 6,
+    Queued = 7
 }
 
 class Job {
     parentJob: Job; // if this job is a pipelined job, its parent that started it.
     joinedJob: Job // if this job is joined, the main job that is running
     initialSearchBuildNumber: number; // the intial, most likely build number for child jobs
+    nextSearchBuildNumber: number; // the next build number to check
+    searchDirection: number = -1; // negative means search backwards, positive means search forwards
 
     /**
      * running -> done              :normal path for root level job
@@ -72,7 +90,7 @@ class Job {
      * unknown -> joined            :alternate path for pipelined job (when several jobs kick off the same job that has not yet been queued)
      * unknown -> lost              :when a pipelined job can not be found after searching.
      */
-    state: string;
+    state: JobState = JobState.New;
     taskUrl: string; // URL for the job definition
     executableUrl: string; // URL for the executing job instance
     executableNumber: number;
@@ -81,9 +99,11 @@ class Job {
     jobConsoleOffset: number = 0;
     jobConsoleEnabled: boolean = false;
 
-    doneJson;
-    resultCode: string;
-    parsedTaskBody;
+    working: boolean = false;
+    workDelay: number = 0;
+
+    parsedTaskBody; // set during state New
+    parsedExecutionResult; // set during state Finishing
 
     constructor(parent: Job, taskUrl: string, executableUrl: string, executableNumber: number, name: string) {
         this.parentJob = parent;
@@ -92,29 +112,151 @@ class Job {
         this.executableNumber = executableNumber;
         this.name = name;
         this.debug('created');
-        
-        executableUrl != null ? this.setRunning(executableNumber) : this.setUnknown();
-        if (parent == null) {
-            // no parent means this is the root job, so queue the console.
-            this.enableConsoleLog();
+    }
+
+    doWork() {
+        if (this.working) { // return if already working
+            this.debug('already working');
+            return;
+        } else {
+            this.debug('starting work');
+            this.working = true;
+            if (this.state == JobState.New) {
+                if (this.parentJob == null) { // root job, can skip Locating
+                    if (captureConsole) {
+                        this.enableConsoleLog();
+                        this.setStreaming(this.executableNumber); // jump to Streaming
+                    } else {
+                        this.changeState(JobState.Queued); // also skip Streaming and jump to Queued
+                    }
+                } else {
+                    this.changeState(JobState.Locating); // pipeline jobs
+                }
+                this.initializeNewJob();
+            } else if (this.state == JobState.Locating || this.state == JobState.LocatingNotFound) {
+                locateChildExecutionBuildNumber(this);
+            } else if (JobState.Streaming == this.state) {
+                streamConsole(this);
+            } else if (JobState.Finishing == this.state) {
+                checkSuccess(this);
+            } else if (this.state == JobState.Done || this.state == JobState.Joined || this.state == JobState.Queued) {
+                //should not be in here
+                console.log(this + 'should not be in doWork()');
+                this.working = false;
+            }
         }
     }
 
-    toString() {
-        var fullMessage = '(Job:' + this.name + ':' + this.executableNumber;
-        if (this.parentJob != null) {
-            fullMessage += ', parentJob:' + this.parentJob;
-        }
-        if (this.joinedJob != null) {
-            fullMessage += ', joinedJob:' + this.joinedJob;
-        }
-        fullMessage += ', state:' + this.state + ')';
-        return fullMessage;
+    changeState(newState: JobState) {
+        this.state = newState;
+        this.debug('state changed');
     }
 
-    debug(message: string) {
-        var fullMessage = this.toString() + ' debug: ' + message;
-        tl.debug(fullMessage);
+    getState(): JobState {
+        return this.state;
+    }
+
+    isActive(): boolean {
+        return this.state == JobState.New ||
+            this.state == JobState.Locating ||
+            this.state == JobState.Streaming ||
+            this.state == JobState.Finishing
+    }
+
+    setStreaming(executableNumber: number): void {
+        this.executableNumber = executableNumber;
+        this.executableUrl = addUrlSegment(this.taskUrl, this.executableNumber.toString());
+        this.changeState(JobState.Streaming);
+
+        this.consoleLog('******************************************************************************\n');
+        this.consoleLog('Jenkins job started: ' + this.name + '\n');
+        this.consoleLog(this.executableUrl + '\n');
+        this.consoleLog('******************************************************************************\n');
+    }
+
+    setParsedExecutionResult(parsedExecutionResult) {
+        this.parsedExecutionResult = parsedExecutionResult;
+        this.consoleLog('******************************************************************************\n');
+        this.consoleLog('Jenkins job finished: ' + this.name + '\n');
+        this.consoleLog(this.executableUrl + '\n');
+        this.consoleLog('******************************************************************************\n');
+    }
+
+    setJoined(joinedJob: Job): void {
+        this.joinedJob = joinedJob;
+        this.changeState(JobState.Joined);
+    }
+
+    getCompletionMessage(): string {
+        return 'Jenkins job: ' + this.getResultString() + ' ' + this.name + ' ' + this.executableUrl;
+    }
+
+    getSummaryTitle() {
+        return 'Jenkins ' + this.name + ' - ' + this.executableNumber + ' - ' + this.getResultString();
+    }
+
+    getResultString(): string {
+        if (this.state == JobState.Queued) {
+            return 'Queued';
+        } else if (this.state == JobState.Done) {
+            var resultCode = this.parsedExecutionResult.result.toUpperCase();
+            // codes map to fields in http://hudson-ci.org/javadoc/hudson/model/Result.html
+            if (resultCode == 'SUCCESS') {
+                return 'Success';
+            } else if (resultCode == 'UNSTABLE') {
+                return 'Unstable';
+            } else if (resultCode == 'FAILURE') {
+                return 'Failure';
+            } else if (resultCode == 'NOT_BUILT') {
+                return 'Not built';
+            } else if (resultCode == 'ABORTED') {
+                return 'Aborted';
+            } else {
+                return resultCode;
+            }
+        } else return 'Unknown';
+    }
+
+    getTaskResult(): number {
+        if (this.state == JobState.Queued) {
+            return tl.TaskResult.Succeeded;
+        } else if (this.state == JobState.Done) {
+            var resultCode = this.parsedExecutionResult.result.toUpperCase();
+            if (resultCode == "SUCCESS" || resultCode == 'UNSTABLE') {
+                return tl.TaskResult.Succeeded;
+            } else {
+                return tl.TaskResult.Failed;
+            }
+        }
+        return tl.TaskResult.Failed;
+    }
+
+    refreshJobTask(callback) {
+        var apiTaskUrl = addUrlSegment(this.taskUrl, "/api/json");
+        this.debug('getting job task URL:' + apiTaskUrl);
+        return request.get({ url: apiTaskUrl }, function requestCallBack(err, httpResponse, body) {
+            if (err) {
+                failError(err);
+            } else if (httpResponse.statusCode != 200) {
+                failReturnCode(httpResponse, 'Unable to retrieve job: ' + this.name);
+            } else {
+                this.parsedTaskBody = JSON.parse(body);
+                this.debug("parsedBody for: " + apiTaskUrl + ": " + JSON.stringify(this.parsedTaskBody));
+                callback(this.parsedTaskBody);
+            }
+        });
+    }
+
+    initializeNewJob() {
+        this.refreshJobTask(function callback(parsedTaskBody) {
+            if (this.parsedTaskBody.inQueue) { // if it's in the queue, start checking with the next build number
+                this.initialSearchBuildNumber = this.parsedTaskBody.nextBuildNumber;
+            } else { // otherwise, check with the last build number.
+                this.initialSearchBuildNumber = this.parsedBody.lastBuild.number;
+            }
+            this.workDelay = 0;
+            this.working = false;
+        });
     }
 
     enableConsoleLog() {
@@ -134,176 +276,110 @@ class Job {
         this.jobConsole += message;
     }
 
-    setUnknown() {
-        this.state = 'unknown';
+    debug(message: string) {
+        var fullMessage = this.toString() + ' debug: ' + message;
+        tl.debug(fullMessage);
     }
 
-    isUnknown(): boolean {
-        return this.state == 'unknown';
-    }
-
-    setRunning(executableNumber: number): void {
-        this.executableNumber = executableNumber;
-        this.executableUrl = addUrlSegment(this.taskUrl, this.executableNumber.toString());
-        var debugPreviousState = this.state;
-        this.state = 'running';
-        this.debug('state changed from: ' + debugPreviousState);
-
-        captureJenkinsConsole(this);
-        this.consoleLog('******************************************************************************\n');
-        this.consoleLog('Jenkins job started: ' + this.name + '\n');
-        this.consoleLog(this.executableUrl + '\n');
-        this.consoleLog('******************************************************************************\n');
-    }
-
-    isRunning(): boolean {
-        return this.state == 'running';
-    }
-
-    setDone(doneJson) {
-        var debugPreviousState = this.state;
-        this.state = 'done';
-        this.debug('state changed from: ' + debugPreviousState);
-
-        this.doneJson = doneJson;
-        this.consoleLog('******************************************************************************\n');
-        this.consoleLog('Jenkins job finished: ' + this.name + '\n');
-        this.consoleLog(this.executableUrl + '\n');
-        this.consoleLog('******************************************************************************\n');
-    }
-
-    isDone(): boolean {
-        return this.state == 'done';
-    }
-
-    setJoined(joinedJob: Job): void {
-        this.joinedJob = joinedJob;
-        var debugPreviousState = this.state;
-        this.state = 'joined';
-        this.debug('state changed from: ' + debugPreviousState);
-    }
-
-    isJoined(): boolean {
-        return this.state == 'joined';
-    }
-
-    isActive(): boolean {
-        return this.isUnknown() || this.isRunning();
-    }
-
-    getCompletionMessage(): string {
-        return 'Jenkins job: ' + this.getResultString() + ' ' + this.name + ' ' + this.executableUrl;
-    }
-
-    getSummaryTitle() {
-        return 'Jenkins ' + this.name + ' - ' + this.executableNumber + ' - ' + this.getResultString();
-    }
-
-    getResultString(): string {
-        if (this.state == 'running') {
-            return 'Queued';
-        } else if (this.state == 'done') {
-            var resultCode = this.doneJson.result.toUpperCase();
-            // codes map to fields in http://hudson-ci.org/javadoc/hudson/model/Result.html
-            if (resultCode == 'SUCCESS') {
-                return 'Success';
-            } else if (resultCode == 'UNSTABLE') {
-                return 'Unstable';
-            } else if (resultCode == 'FAILURE') {
-                return 'Failure';
-            } else if (resultCode == 'NOT_BUILT') {
-                return 'Not built';
-            } else if (resultCode == 'ABORTED') {
-                return 'Aborted';
-            } else {
-                return resultCode;
-            }
-        } else return 'Unknown';
-    }
-
-    getTaskResult(): number {
-        if (this.state == 'running') {
-            return tl.TaskResult.Succeeded;
-        } else if (this.state == 'done') {
-            var resultCode = this.doneJson.result.toUpperCase();
-            //console.log('resultCode='+resultCode);
-            if (resultCode == "SUCCESS" || this.resultCode == 'UNSTABLE') {
-                return tl.TaskResult.Succeeded;
-            } else {
-                return tl.TaskResult.Failed;
-            }
+    toString() {
+        var fullMessage = '(Job:' + this.name + ':' + this.executableNumber;
+        if (this.parentJob != null) {
+            fullMessage += ', parentJob:' + this.parentJob;
         }
-        return tl.TaskResult.Failed;
+        if (this.joinedJob != null) {
+            fullMessage += ', joinedJob:' + this.joinedJob;
+        }
+        fullMessage += ', state:' + this.state + ')';
+        return fullMessage;
+    }
+}
+
+class JobQueue {
+    jobs: Job[] = [];
+
+    constructor(rootJob: Job) {
+        this.jobs.push(rootJob);
+        this.start();
     }
 
-    getJobTask(getTaskCallback) {
-        if (this.parsedTaskBody) { // already retrieved
-            getTaskCallback(this.parsedTaskBody);
-        } else {
-            var apiTaskUrl = addUrlSegment(this.taskUrl, "/api/json");
-            this.debug('getting job task URL:' + apiTaskUrl);
-            return request.get({ url: apiTaskUrl }, function requestCallBack(err, httpResponse, body) {
-                if (err) {
-                    tl.setResult(tl.TaskResult.Failed, err);
-                } else if (httpResponse.statusCode != 200) {
-                    failReturnCode(httpResponse, 'Unable to retrieve job: ' + this.name);
-                } else {
-                    this.parsedTaskBody = JSON.parse(body);
-                    this.debug("parsedBody for: " + apiTaskUrl + ": " + JSON.stringify(this.parsedTaskBody));
-                    getTaskCallback(this.parsedTaskBody);
+    start(): void {
+        //while (true) { // run until all jobs are finished
+            for (var i in this.jobs) {
+                var job = this.jobs[i];
+                if (job.isActive()) {
+                    job.doWork();
                 }
-            });
+            }
+            if (this.countRemainingJobs() == 0) {
+                return this.stop();
+            }
+        //}
+    }
+
+    stop(): void {
+        var message: string = null;
+        if (capturePipeline) {
+            message = 'Jenkins pipeline complete';
+        } else if (captureConsole) {
+            message = 'Jenkins job complete';
+        } else {
+            message = 'Jenkins job queued';
+        }
+        tl.setResult(tl.TaskResult.Succeeded, message);
+        tl.exit(0);
+    }
+
+    queue(job: Job): void {
+        this.jobs.push(job);
+    }
+
+    countRemainingJobs(): number {
+        var count: number = 0;
+        for (var i in this.jobs) {
+            var job = this.jobs[i];
+            if (job.isActive()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    flushJobConsolesIfDone(): void {
+        for (var i in this.jobs) {
+            var job = this.jobs[i];
+            if (job.getState() == JobState.Done) {
+                job.enableConsoleLog();
+            }
+        }
+    }
+
+    findJob(name: string, executableNumber: number): Job {
+        for (var i in this.jobs) {
+            var job = this.jobs[i];
+            if (job.name == name && job.executableNumber == executableNumber) {
+                return job;
+            }
+        }
+        return null;
+    }
+
+    joinJobs(parentJob: Job, joinToJob: Job): void {
+        for (var i in this.jobs) {
+            var job = this.jobs[i];
+            if (job.parentJob == parentJob && job != joinToJob) {
+                job.setJoined(joinToJob);
+            }
         }
     }
 }
 
-var jobs: Job[] = [];
-
-function countRemainingJobs(): number {
-    var count: number = 0;
-    for (var i = 0; i < jobs.length; i++) {
-        if (jobs[i].isActive()) {
-            count++;
-        }
-    }
-    return count;
-}
-
-function flushJobConsolesIfDone(): void {
-    for (var i = 0; i < jobs.length; i++) {
-        if (jobs[i].state == 'done') {
-            jobs[i].enableConsoleLog();
-        }
-    }
-}
-
-/**
- * Finds the job associated with the name and executableNumber
- */
-function findJob(name: string, executableNumber: number): Job {
-    for (var j in jobs) {
-        var job = jobs[j];
-        if (job.name == name && job.executableNumber == executableNumber) {
-            return job;
-        }
-    }
-    return null;
-}
-
-function joinJobs(parentJob: Job, joinToJob: Job): void {
-    for (var i in jobs) {
-        var job = jobs[i];
-        if (job.parentJob == parentJob && job != joinToJob) {
-            job.setJoined(joinToJob);
-        }
-    }
-}
+var jobQueue;
 
 function trackJobQueued(queueUri: string) {
     tl.debug('Tracking progress of job queue: ' + queueUri);
     request.get({ url: queueUri }, function callBack(err, httpResponse, body) {
         if (err) {
-            tl.setResult(tl.TaskResult.Failed, err);
+            failError(err);
         } else if (httpResponse.statusCode != 200) {
             failReturnCode(httpResponse, 'Job progress tracking failed to read job queue');
         } else {
@@ -313,6 +389,7 @@ function trackJobQueued(queueUri: string) {
             // canceled is spelled wrong in the body with 2 Ls (checking correct spelling also in case they fix it)
             if (parsedBody.cancelled || parsedBody.canceled) {
                 tl.setResult(tl.TaskResult.Failed, 'Jenkins job canceled.');
+                tl.exit(1);
             }
             var executable = parsedBody.executable;
             if (!executable) {
@@ -321,15 +398,8 @@ function trackJobQueued(queueUri: string) {
                     trackJobQueued(queueUri);
                 }, captureConsolePollInterval);
             } else {
-                var job: Job = new Job(null, parsedBody.task.url, parsedBody.executable.url, parsedBody.executable.number, parsedBody.task.name);
-                jobs.push(job);
-                if (captureConsole) {
-                    // start capturing console
-                    captureJenkinsConsole(job);
-                } else {
-                    // no console option, just create link and finish
-                    createLinkAndFinish(job);
-                }
+                var rootJob: Job = new Job(null, parsedBody.task.url, parsedBody.executable.url, parsedBody.executable.number, parsedBody.task.name);
+                jobQueue = new JobQueue(rootJob);
             }
         }
     });
@@ -352,47 +422,18 @@ function createLinkAndFinish(job: Job) {
         }
         //if capturing the pipeline and this job succeeded, search for downstream jobs 
         if (capturePipeline && job.getTaskResult() == tl.TaskResult.Succeeded) {
-            queueDownStreamJobs(job);
+            var downstreamProjects = job.parsedTaskBody.downstreamProjects;
+            // each of these runs in parallel
+            downstreamProjects.forEach((project) => {
+                var child: Job = new Job(job, project.url, null, -1, project.name);
+                jobQueue.queue(child);
+            });
+            job.changeState(JobState.Done);
+            job.working = false;
         } else {
             tl.setResult(job.getTaskResult(), job.getCompletionMessage());
+            tl.exit(1);
         }
-    });
-}
-
-function queueDownStreamJobs(job: Job) {
-    job.getJobTask(function callBack(parsedBody) {
-        var downstreamProjects = parsedBody.downstreamProjects;
-
-        var enableConsole = false;
-        if (countRemainingJobs() == 0) {
-            flushJobConsolesIfDone();
-            if (downstreamProjects.length == 1) {
-                enableConsole = true;
-            }
-        }
-
-        // each of these runs in parallel
-        downstreamProjects.forEach((project) => {
-            var child: Job = new Job(job, project.url, null, -1, project.name);
-            jobs.push(child);
-            if (enableConsole) {
-                child.enableConsoleLog();
-            }
-            locateChildExecution(child);
-        })
-    });
-}
-
-function locateChildExecution(job: Job) {
-    job.getJobTask(function callBack(parsedBody) {
-        if (parsedBody.inQueue) { // if it's in the queue, start checking with the next build number
-            job.initialSearchBuildNumber = parsedBody.nextBuildNumber;
-            console.log(job + ' in queue');
-        } else { // otherwise, check with the last build number.
-            job.initialSearchBuildNumber = parsedBody.lastBuild.number;
-            console.log(job + ' not in queue');
-        }
-        locateChildExecutionBuildNumber(job, job.initialSearchBuildNumber, -1);
     });
 }
 
@@ -403,27 +444,23 @@ function locateChildExecution(job: Job) {
  * intial start point and searches forward until the job is found, or a 404 is reached and no more jobs
  * are queued.  At any point, the search also ends if the job is joined to another job.
  */
-function locateChildExecutionBuildNumber(job: Job, buildNumberToCheck: number, directionToSearch: number) {
-    if (!job.isUnknown()) {
-        return;
-    }
-    var url = addUrlSegment(job.taskUrl, buildNumberToCheck + "/api/json");
+function locateChildExecutionBuildNumber(job: Job) {
+    var url = addUrlSegment(job.taskUrl, job.nextSearchBuildNumber + "/api/json");
     job.debug('pipeline, locating child execution URL:' + url);
     request.get({ url: url }, function callBack(err, httpResponse, body) {
         if (err) {
-            tl.setResult(tl.TaskResult.Failed, err);
+            failError(err);
         } else if (httpResponse.statusCode == 404) {
             // This job doesn't exist -- do we expect it to in the near future because it has been queued?
-            job.debug('404 for: ' + job.name + ':' + buildNumberToCheck + ' triggered by :' + job.parentJob.name + ':' + job.parentJob.doneJson.number);
+            job.debug('404 for: ' + job.name + ':' + job.nextSearchBuildNumber);
             job.debug('checking if it is in the queue');
-            job.getJobTask(function callback(parsedJobTaskBody) {
-                if (parsedJobTaskBody.inQueue || parsedJobTaskBody.lastCompletedBuild >= buildNumberToCheck) {
+            job.refreshJobTask(function callback(parsedJobTaskBody) {
+                if (parsedJobTaskBody.inQueue || parsedJobTaskBody.lastCompletedBuild >= job.nextSearchBuildNumber) {
                     //see if it's in the queue, or maybe it just ran right after we first checked
                     job.debug('job has been queued, continue searching');
-                    setTimeout(function () {
-                        locateChildExecutionBuildNumber(job, buildNumberToCheck, directionToSearch);
-                    }, captureConsolePollInterval);
-                } else if (job.isUnknown()) {
+                    job.workDelay = captureConsolePollInterval;
+                    job.working = false;
+                } else {
                     job.debug('job is not queued, end search');
                     console.log(job + ' can not be found.');
                     console.log('Warning: Job: ' + job.name + " queued by Job: " + job.parentJob.name + ": " + job.parentJob.executableUrl + " can not be found.");
@@ -445,52 +482,56 @@ function locateChildExecutionBuildNumber(job: Job, buildNumberToCheck: number, d
              */
             var causes = parsedBody.actions[0].causes;
             var cause = causes[0];
-            var parentJob = findJob(cause.upstreamProject, cause.upstreamBuild);
+            var parentJob = jobQueue.findJob(cause.upstreamProject, cause.upstreamBuild);
             if (parentJob == job.parentJob) {
                 // found it; mark it running, and start grabbing the console
-                job.setRunning(buildNumberToCheck);
+                job.setStreaming(job.nextSearchBuildNumber);
                 // fall through the if, and join any other causes to this job
             }
 
             var joinedCauses = causes.length > 1 ? causes.slice(1) : [];
             for (var i in joinedCauses) { // iterate over all and join as many as possible.
                 cause = joinedCauses[i];
-                var parentJob = findJob(cause.upstreamProject, cause.upstreamBuild);
-                joinJobs(parentJob, job);
+                var parentJob = jobQueue.findJob(cause.upstreamProject, cause.upstreamBuild);
+                jobQueue.joinJobs(parentJob, job);
             }
 
-            if (!job.isUnknown()) {
-                //could have been started/finished above, or joined by another thread
-                return;
-            }
-
-            // need to keep searching
-            job.debug('Search failed for: ' + job.name + ':' + buildNumberToCheck + ' triggered by :' + job.parentJob.name + ':' + job.parentJob.doneJson.number);
-            if (directionToSearch == -1) { // search backwards
-                if (parsedBody.timestamp <= job.parentJob.doneJson.timestamp || buildNumberToCheck == 1) {
-                    job.debug('changing search direction');
-                    // we already searched backwards as far as possible, 
-                    // so start searching forwards from the begining
-                    locateChildExecutionBuildNumber(job, job.initialSearchBuildNumber + 1, 1);
-                } else {
-                    job.debug('searching back one');
-                    // search backwards one
-                    locateChildExecutionBuildNumber(job, buildNumberToCheck - 1, directionToSearch);
+            if (job.getState() == JobState.Locating) {
+                // need to keep searching
+                job.debug('Search failed for: ' + job.name + ':' + job.nextSearchBuildNumber + ' triggered by :' + job.parentJob.name + ':' + job.parentJob.parsedExecutionResult.number);
+                if (job.searchDirection < 0) { // search backwards
+                    if (parsedBody.timestamp <= job.parentJob.parsedExecutionResult.timestamp || job.nextSearchBuildNumber == 1) {
+                        // we already searched backwards as far as possible, 
+                        // so start searching forwards from the begining
+                        job.debug('changing search direction');
+                        job.nextSearchBuildNumber = job.initialSearchBuildNumber + 1;
+                        job.searchDirection = 1;
+                    } else { // search backwards one
+                        job.debug('searching back one');
+                        job.nextSearchBuildNumber--;
+                    }
+                } else { // search forwards one
+                    job.debug('searching forward one');
+                    job.nextSearchBuildNumber++;
                 }
-            } else { // search forwards
-                job.debug('searching forward one');
-                locateChildExecutionBuildNumber(job, buildNumberToCheck + 1, directionToSearch);
             }
+            job.workDelay = 0;
+            job.working = false;
         }
     });
 }
 
-function captureJenkinsConsole(job: Job) {
+/**
+ * Streams the Jenkins console.
+ * 
+ * JobState = Streaming, transition to Finishing possible.
+ */
+function streamConsole(job: Job) {
     var fullUrl = addUrlSegment(job.executableUrl, '/logText/progressiveText/?start=' + job.jobConsoleOffset);
     job.debug('Tracking progress of job URL: ' + fullUrl);
     request.get({ url: fullUrl }, function callBack(err, httpResponse, body) {
         if (err) {
-            tl.setResult(tl.TaskResult.Failed, err);
+            failError(err);
         } else if (httpResponse.statusCode != 200) {
             failReturnCode(httpResponse, 'Job progress tracking failed to read job progress');
         } else {
@@ -499,36 +540,39 @@ function captureJenkinsConsole(job: Job) {
             if (xMoreData && xMoreData == 'true') {
                 var offset = httpResponse.headers['x-text-size'];
                 job.jobConsoleOffset = offset;
-                // job still running so keep logging console
-                setTimeout(function () {
-                    captureJenkinsConsole(job);
-                }, captureConsolePollInterval);
+                job.workDelay = captureConsolePollInterval;
+                job.working = false;
             } else { // job is done -- did it succeed or not?
-                checkSuccess(job);
+                job.workDelay = 0;
+                job.changeState(JobState.Finishing);
+                job.working = false;
             }
         }
     });
 }
-
+/**
+ * Checks the success of the job
+ * 
+ * JobState = Finishing, transition to Done possible
+ */
 function checkSuccess(job: Job) {
     var resultUrl = addUrlSegment(job.executableUrl, 'api/json');
     job.debug('Tracking completion status of job: ' + resultUrl);
     request.get({ url: resultUrl }, function callBack(err, httpResponse, body) {
         if (err) {
-            tl.setResult(tl.TaskResult.Failed, err);
+            fail(err);
         } else if (httpResponse.statusCode != 200) {
             failReturnCode(httpResponse, 'Job progress tracking failed to read job result');
         } else {
             var parsedBody = JSON.parse(body);
             job.debug("parsedBody for: " + resultUrl + ": " + JSON.stringify(parsedBody));
             if (parsedBody.result) {
-                job.setDone(parsedBody);
+                job.setParsedExecutionResult(parsedBody);
                 createLinkAndFinish(job);
             } else {
                 // result not updated yet -- keep trying
-                setTimeout(function () {
-                    checkSuccess(job);
-                }, captureConsolePollInterval);
+                job.workDelay = captureConsolePollInterval;
+                job.working = false;
             }
         }
     });
@@ -586,7 +630,7 @@ tl.debug('initialPostData = ' + JSON.stringify(initialPostData));
  */
 request.post(initialPostData, function optionalCallback(err, httpResponse, body) {
     if (err) {
-        tl.setResult(tl.TaskResult.Failed, err);
+        fail(err);
     } else if (httpResponse.statusCode != 201) {
         failReturnCode(httpResponse, 'Job creation failed.');
     } else {
