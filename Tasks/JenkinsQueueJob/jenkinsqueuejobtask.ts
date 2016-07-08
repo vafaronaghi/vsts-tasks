@@ -153,6 +153,9 @@ class Job {
     stopWork(delay: number, jobState: JobState) {
         if (jobState && jobState != this.state) {
             this.changeState(jobState);
+            if (!this.isActive()) {
+                jobQueue.flushJobConsolesSafely();
+            }
         }
         this.workDelay = delay;
         this.working = false;
@@ -358,6 +361,7 @@ class JobQueue {
         } else {
             message = 'Jenkins job queued';
         }
+        this.writeFinalMarkdown();
         tl.setResult(tl.TaskResult.Succeeded, message);
         tl.exit(0);
     }
@@ -429,6 +433,49 @@ class JobQueue {
         }
         return null;
     }
+
+    writeFinalMarkdown() {
+        tl.debug('writing summary markdown');
+        var rootJob: Job = this.jobs[0];
+        var tempDir = shell.tempdir();
+        var linkMarkdownFile = path.join(tempDir, 'JenkinsJob_' + rootJob.name + '_' + rootJob.executableNumber + '.md');
+        tl.debug('markdown location: ' + linkMarkdownFile);
+        var tab: string = "  ";
+        var markdownContents = walkHierarchy(rootJob, "");
+
+        function walkHierarchy(job: Job, indent: string): string {
+            var jobContents = indent + '<ul>\n';
+            var jobState: JobState = job.getState();
+            if (jobState == JobState.Done || jobState == JobState.Queued) {
+                jobContents += indent + '[' + job.name + ' #' + job.executableNumber + '](' + job.executableUrl + ')<br>\n';
+            } else if (jobState == JobState.Joined) {
+                jobContents += indent + '[' + job.joinedJob.name + ' #' + job.joinedJob.executableNumber + '](' + job.joinedJob.executableUrl + ')<br>\n';
+            } else {
+                console.log('Warning ' + job + ' is still in active state');
+            }
+
+            var childContents = "";
+            for (var i in job.childrenJobs) {
+                var child = job.childrenJobs[i];
+                childContents += walkHierarchy(child, indent + tab);
+            }
+
+            return jobContents + childContents + indent + '</ul>\n';
+        }
+
+        fs.writeFile(linkMarkdownFile, markdownContents, function callback(err) {
+            tl.debug('writeFinalMarkdown().writeFile().callback()');
+
+            if (err) {
+                //don't fail the build -- there just won't be a link
+                console.log('Error creating link to Jenkins job: ' + err);
+            } else {
+                console.log('##vso[task.addattachment type=Distributedtask.Core.Summary;name=Jenkins Results;]' + linkMarkdownFile);
+            }
+
+        });
+
+    }
 }
 
 var jobQueue: JobQueue;
@@ -451,23 +498,9 @@ function createLinkAndFinish(job: Job, finalJobState: JobState) {
             job.consoleLog('##vso[task.addattachment type=Distributedtask.Core.Summary;name=' + summaryTitle + ';]' + linkMarkdownFile);
         }
 
-        //if capturing the pipeline and this job succeeded, search for downstream jobs 
-        if (capturePipeline && job.getTaskResult(finalJobState) == tl.TaskResult.Succeeded) {
-            var downstreamProjects = job.parsedTaskBody.downstreamProjects;
-            // each of these runs in parallel
-            downstreamProjects.forEach((project) => {
-                var child: Job = new Job(job, project.url, null, -1, project.name);
-                jobQueue.queue(child);
-            });
-        } else {
-            var taskResult = job.getTaskResult(finalJobState);
-            tl.setResult(taskResult, job.getCompletionMessage(finalJobState));
-            tl.exit(taskResult == tl.TaskResult.Succeeded ? 0 : 1);
-        }
-        jobQueue.flushJobConsolesSafely();
-        job.stopWork(0, finalJobState);
     });
 }
+
 
 /**
  * Search for a pipelined job starting with a best guess for the build number, and a direction to search.
@@ -593,7 +626,7 @@ function streamConsole(job: Job) {
 function finish(job: Job) {
     tl.debug('finish()');
     if (!captureConsole) { // transition to Queued
-        createLinkAndFinish(job, JobState.Queued);
+        job.stopWork(0, JobState.Queued);
     } else { // stay in Finishing, or eventually go to Done
         var resultUrl = addUrlSegment(job.executableUrl, 'api/json');
         job.debug('Tracking completion status of job: ' + resultUrl);
@@ -608,7 +641,15 @@ function finish(job: Job) {
                 job.debug("parsedBody for: " + resultUrl + ": " + JSON.stringify(parsedBody));
                 if (parsedBody.result) {
                     job.setParsedExecutionResult(parsedBody);
-                    createLinkAndFinish(job, JobState.Done);
+                    if (capturePipeline) {
+                        var downstreamProjects = job.parsedTaskBody.downstreamProjects;
+                        // each of these runs in parallel
+                        downstreamProjects.forEach((project) => {
+                            var child: Job = new Job(job, project.url, null, -1, project.name);
+                            jobQueue.queue(child);
+                        });
+                    }
+                    job.stopWork(0, JobState.Done);
                 } else {
                     // result not updated yet -- keep trying
                     job.stopWork(pollInterval, job.state);
