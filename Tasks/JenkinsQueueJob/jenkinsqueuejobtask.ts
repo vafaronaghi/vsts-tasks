@@ -36,7 +36,6 @@ jobQueueUrl += (parameterizedJob) ? '/buildWithParameters?delay=0sec' : '/build?
 tl.debug('jobQueueUrl=' + jobQueueUrl);
 
 function addUrlSegment(baseUrl: string, segment: string): string {
-    tl.debug('addUrlSegment');
     var resultUrl = null;
     if (baseUrl.endsWith('/') && segment.startsWith('/')) {
         resultUrl = baseUrl + segment.slice(1);
@@ -45,17 +44,14 @@ function addUrlSegment(baseUrl: string, segment: string): string {
     } else {
         resultUrl = baseUrl + '/' + segment;
     }
-    //tl.debug('addUrlSegment baseUrl: ' + baseUrl + ' segment: ' + segment + ' resultUrl: ' + resultUrl);
     return resultUrl;
 }
 
 function failError(err): void {
-    tl.debug('failError');
     fail(err);
 }
 
 function failReturnCode(httpResponse, message: string): void {
-    tl.debug('failReturnCode');
     var fullMessage = message +
         '\nHttpResponse.statusCode=' + httpResponse.statusCode +
         '\nHttpResponse.statusMessage=' + httpResponse.statusMessage +
@@ -73,7 +69,6 @@ function fail(message: string): void {
 enum JobState {
     New,
     Locating,
-    LocatingNotFound,
     Streaming,
     Finishing,
     Done,
@@ -84,6 +79,7 @@ enum JobState {
 
 class Job {
     parentJob: Job; // if this job is a pipelined job, its parent that started it.
+    childrenJobs: Job[] = []; // any pipelined jobs
     joinedJob: Job // if this job is joined, the main job that is running
     initialSearchBuildNumber: number; // the intial, most likely build number for child jobs
     nextSearchBuildNumber: number; // the next build number to check
@@ -111,24 +107,23 @@ class Job {
     parsedExecutionResult; // set during state Finishing
 
     constructor(parent: Job, taskUrl: string, executableUrl: string, executableNumber: number, name: string) {
-        tl.debug('new job');
         this.parentJob = parent;
         this.taskUrl = taskUrl;
         this.executableUrl = executableUrl;
         this.executableNumber = executableNumber;
         this.name = name;
+        if (this.parentJob != null) {
+            this.parentJob.childrenJobs.push(this); // do this last since parentJob is already in the queue
+        }
         this.debug('created');
     }
 
     doWork() {
         if (this.working) { // return if already working
-            this.debug('already working');
             return;
         } else {
-            this.debug('starting work');
             this.working = true;
             setTimeout(() => {
-                tl.debug('doWork().setTimeout()');
                 if (this.state == JobState.New) {
                     if (this.parentJob == null) { // root job, can skip Locating
                         if (captureConsole) {
@@ -141,15 +136,14 @@ class Job {
                         this.changeState(JobState.Locating); // pipeline jobs
                     }
                     this.initializeNewJob();
-                } else if (this.state == JobState.Locating || this.state == JobState.LocatingNotFound) {
+                } else if (this.state == JobState.Locating) {
                     locateChildExecutionBuildNumber(this);
                 } else if (JobState.Streaming == this.state) {
                     streamConsole(this);
                 } else if (JobState.Finishing == this.state) {
                     finish(this);
                 } else {
-                    // non active states, should not be in here
-                    tl.debug(this + 'should not be in doWork()');
+                    // usually do not get here, but this can happen if another job caused this one to be joined
                     this.stopWork(0, null);
                 }
             }, this.workDelay);
@@ -157,7 +151,6 @@ class Job {
     }
 
     stopWork(delay: number, jobState: JobState) {
-        tl.debug('job.stopWork()');
         if (jobState && jobState != this.state) {
             this.changeState(jobState);
         }
@@ -166,27 +159,25 @@ class Job {
     }
 
     changeState(newState: JobState) {
-        tl.debug('job.changeState()');
+        var oldState = this.state;
         this.state = newState;
-        this.debug('state changed');
+        if (oldState != newState) {
+            this.debug('state changed from: ' + oldState);
+        }
     }
 
     getState(): JobState {
-        tl.debug('job.getState()');
         return this.state;
     }
 
     isActive(): boolean {
-        tl.debug('job.isActive()');
         return this.state == JobState.New ||
             this.state == JobState.Locating ||
-            this.state == JobState.LocatingNotFound ||
             this.state == JobState.Streaming ||
             this.state == JobState.Finishing
     }
 
     setStreaming(executableNumber: number): void {
-        tl.debug('job.setStreaming()');
         this.executableNumber = executableNumber;
         this.executableUrl = addUrlSegment(this.taskUrl, this.executableNumber.toString());
         this.changeState(JobState.Streaming);
@@ -202,7 +193,6 @@ class Job {
     }
 
     setParsedExecutionResult(parsedExecutionResult) {
-        tl.debug('job.setParsedExecutionResult');
         this.parsedExecutionResult = parsedExecutionResult;
         this.consoleLog('******************************************************************************\n');
         this.consoleLog('Jenkins job finished: ' + this.name + '\n');
@@ -211,23 +201,20 @@ class Job {
     }
 
     setJoined(joinedJob: Job): void {
-        tl.debug('job.setJoined()');
+        tl.debug(this + '.setJoined(' + joinedJob + ')');
         this.joinedJob = joinedJob;
         this.changeState(JobState.Joined);
     }
 
     getCompletionMessage(finalJobState: JobState): string {
-        tl.debug('job.getCompletionMessage()');
         return 'Jenkins job: ' + this.getResultString(finalJobState) + ' ' + this.name + ' ' + this.executableUrl;
     }
 
     getSummaryTitle(finalJobState: JobState) {
-        tl.debug('job.getSummaryTitle()');
         return 'Jenkins ' + this.name + ' - ' + this.executableNumber + ' - ' + this.getResultString(finalJobState);
     }
 
     getResultString(finalJobState: JobState): string {
-        tl.debug('job.getResultString()');
         if (finalJobState == JobState.Queued) {
             return 'Queued';
         } else if (finalJobState == JobState.Done) {
@@ -250,7 +237,6 @@ class Job {
     }
 
     getTaskResult(finalJobState: JobState): number {
-        tl.debug('job.getTaskResult()');
         if (finalJobState == JobState.Queued) {
             return tl.TaskResult.Succeeded;
         } else if (finalJobState == JobState.Done) {
@@ -265,11 +251,9 @@ class Job {
     }
 
     refreshJobTask(job, callback) {
-        tl.debug('job.refreshJobTask()');
         var apiTaskUrl = addUrlSegment(this.taskUrl, "/api/json");
         this.debug('getting job task URL:' + apiTaskUrl);
         return request.get({ url: apiTaskUrl }, function requestCallBack(err, httpResponse, body) {
-            tl.debug('job.refreshJobTask().requestCallBack()');
             if (err) {
                 failError(err);
             } else if (httpResponse.statusCode != 200) {
@@ -283,10 +267,8 @@ class Job {
     }
 
     initializeNewJob() {
-        tl.debug('job.initializeNewJob()');
         var job = this;
         this.refreshJobTask(this, function callback() {
-            tl.debug('job.initializeNewJob().classback()');
             if (job.parsedTaskBody.inQueue) { // if it's in the queue, start checking with the next build number
                 job.initialSearchBuildNumber = job.parsedTaskBody.nextBuildNumber;
             } else { // otherwise, check with the last build number.
@@ -298,7 +280,6 @@ class Job {
     }
 
     enableConsole() {
-        tl.debug('job.enableConsoleLog()');
         if (captureConsole) {
             if (!this.jobConsoleEnabled) {
                 if (this.jobConsole != "") { // flush any queued output
@@ -314,7 +295,6 @@ class Job {
     }
 
     consoleLog(message: string) {
-        tl.debug('job.console()');
         if (this.jobConsoleEnabled) {
             //only log it if the console is enabled.
             console.log(message);
@@ -344,19 +324,16 @@ class JobQueue {
     jobs: Job[] = [];
 
     constructor(rootJob: Job) {
-        tl.debug('new JobQueue');
         this.jobs.push(rootJob);
         this.start();
     }
 
     intervalId
-    intervalMillis: number = 1000;
+    intervalMillis: number = 10;
 
     start(): void {
         tl.debug('jobQueue.start()');
-
         this.intervalId = setInterval(() => {
-            tl.debug('jobQueue.setInterval()');
             var activeJobs: Job[] = this.getActiveJobs();
             if (activeJobs.length == 0) {
                 this.stop();
@@ -386,8 +363,6 @@ class JobQueue {
     }
 
     queue(job: Job): void {
-        tl.debug('jobQueue.queue()');
-
         this.jobs.push(job);
     }
 
@@ -446,8 +421,6 @@ class JobQueue {
     }
 
     findJob(name: string, executableNumber: number): Job {
-        tl.debug('jobQueue.findJob()');
-
         for (var i in this.jobs) {
             var job = this.jobs[i];
             if (job.name == name && job.executableNumber == executableNumber) {
@@ -456,24 +429,11 @@ class JobQueue {
         }
         return null;
     }
-
-    joinJobs(parentJob: Job, joinToJob: Job): void {
-        tl.debug('jobQueue.joinJobs()');
-
-        for (var i in this.jobs) {
-            var job = this.jobs[i];
-            if (job.parentJob == parentJob && job != joinToJob) {
-                job.setJoined(joinToJob);
-            }
-        }
-    }
 }
 
 var jobQueue: JobQueue;
 
 function createLinkAndFinish(job: Job, finalJobState: JobState) {
-    tl.debug('createLinkAndFinish()');
-
     var tempDir = shell.tempdir();
     var linkMarkdownFile = path.join(tempDir, 'JenkinsJob_' + job.name + '_' + job.executableNumber + '.md');
     job.debug('jenkinsLink: ' + linkMarkdownFile);
@@ -531,12 +491,10 @@ function locateChildExecutionBuildNumber(job: Job) {
             job.debug('404 for: ' + job.name + ':' + job.nextSearchBuildNumber);
             job.debug('checking if it is in the queue');
             job.refreshJobTask(job, function refreshJobTaskCallback() {
-                tl.debug('locateChildExecutionBuildNumber().requestCallback().refreshJobTaskCallback()');
-
                 if (job.parsedTaskBody.inQueue || job.parsedTaskBody.lastCompletedBuild >= job.nextSearchBuildNumber) {
                     //see if it's in the queue, or maybe it just ran right after we first checked
                     job.debug('job has been queued, continue searching');
-                    job.stopWork(pollInterval, JobState.LocatingNotFound);
+                    job.stopWork(pollInterval, job.state);
                 } else {
                     job.stopWork(pollInterval, JobState.Lost);
                 }
@@ -557,21 +515,26 @@ function locateChildExecutionBuildNumber(job: Job) {
              */
             var causes = parsedBody.actions[0].causes;
             var cause = causes[0];
-            var parentJob = jobQueue.findJob(cause.upstreamProject, cause.upstreamBuild);
-            if (parentJob == job.parentJob) {
+            var firstCauseJob = jobQueue.findJob(cause.upstreamProject, cause.upstreamBuild);
+            if (firstCauseJob == job.parentJob) {
                 // found it; mark it running, and start grabbing the console
                 job.setStreaming(job.nextSearchBuildNumber);
-                // fall through the if, and join any other causes to this job
-            }
 
-            var joinedCauses = causes.length > 1 ? causes.slice(1) : [];
-            for (var i in joinedCauses) { // iterate over all and join as many as possible.
-                cause = joinedCauses[i];
-                var parentJob = jobQueue.findJob(cause.upstreamProject, cause.upstreamBuild);
-                jobQueue.joinJobs(parentJob, job);
-            }
-
-            if (job.getState() == JobState.Locating) {
+                //join all other siblings to this same job
+                var joinedCauses = causes.length > 1 ? causes.slice(1) : [];
+                for (var i in joinedCauses) {
+                    cause = joinedCauses[i];
+                    var causeJob = jobQueue.findJob(cause.upstreamProject, cause.upstreamBuild);
+                    if (causeJob != null) {
+                        for (var c in causeJob.childrenJobs) {
+                            var child: Job = causeJob.childrenJobs[c];
+                            if (child.name == job.name) {
+                                child.setJoined(job);
+                            }
+                        }
+                    }
+                }
+            } else if (job.getState() == JobState.Locating) {
                 // need to keep searching
                 job.debug('Search failed for: ' + job.name + ':' + job.nextSearchBuildNumber + ' triggered by :' + job.parentJob.name + ':' + job.parentJob.parsedExecutionResult.number);
                 if (job.searchDirection < 0) { // search backwards
@@ -601,7 +564,6 @@ function locateChildExecutionBuildNumber(job: Job) {
  * JobState = Streaming, transition to Finishing possible.
  */
 function streamConsole(job: Job) {
-    tl.debug('streamConsole()');
     var fullUrl = addUrlSegment(job.executableUrl, '/logText/progressiveText/?start=' + job.jobConsoleOffset);
     job.debug('Tracking progress of job URL: ' + fullUrl);
     request.get({ url: fullUrl }, function requestCallback(err, httpResponse, body) {
