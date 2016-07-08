@@ -104,6 +104,7 @@ class Job {
     workDelay: number = 0;
 
     parsedTaskBody; // set during state New
+    parsedCauses; // set prior to Streaming
     parsedExecutionResult; // set during state Finishing
 
     constructor(parent: Job, taskUrl: string, executableUrl: string, executableNumber: number, name: string) {
@@ -128,7 +129,7 @@ class Job {
                     if (this.parentJob == null) { // root job, can skip Locating
                         if (captureConsole) {
                             this.enableConsole();
-                            this.setStreaming(this.executableNumber); // jump to Streaming
+                            this.setStreaming(null, this.executableNumber); // jump to Streaming
                         } else {
                             this.changeState(JobState.Finishing); // also skip Streaming and jump to Finishing
                         }
@@ -180,7 +181,8 @@ class Job {
             this.state == JobState.Finishing
     }
 
-    setStreaming(executableNumber: number): void {
+    setStreaming(causes, executableNumber: number): void {
+        this.parsedCauses = causes;
         this.executableNumber = executableNumber;
         this.executableUrl = addUrlSegment(this.taskUrl, this.executableNumber.toString());
         this.changeState(JobState.Streaming);
@@ -209,18 +211,10 @@ class Job {
         this.changeState(JobState.Joined);
     }
 
-    getCompletionMessage(finalJobState: JobState): string {
-        return 'Jenkins job: ' + this.getResultString(finalJobState) + ' ' + this.name + ' ' + this.executableUrl;
-    }
-
-    getSummaryTitle(finalJobState: JobState) {
-        return 'Jenkins ' + this.name + ' - ' + this.executableNumber + ' - ' + this.getResultString(finalJobState);
-    }
-
-    getResultString(finalJobState: JobState): string {
-        if (finalJobState == JobState.Queued) {
+    getResultString(): string {
+        if (this.state == JobState.Queued) {
             return 'Queued';
-        } else if (finalJobState == JobState.Done) {
+        } else if (this.state == JobState.Done) {
             var resultCode = this.parsedExecutionResult.result.toUpperCase();
             // codes map to fields in http://hudson-ci.org/javadoc/hudson/model/Result.html
             if (resultCode == 'SUCCESS') {
@@ -286,7 +280,7 @@ class Job {
         if (captureConsole) {
             if (!this.jobConsoleEnabled) {
                 if (this.jobConsole != "") { // flush any queued output
-                    console.log(this.jobConsole);
+                    //console.log(this.jobConsole);
                 }
                 this.jobConsoleEnabled = true;
             }
@@ -300,7 +294,7 @@ class Job {
     consoleLog(message: string) {
         if (this.jobConsoleEnabled) {
             //only log it if the console is enabled.
-            console.log(message);
+            //console.log(message);
         }
         this.jobConsole += message;
     }
@@ -331,7 +325,7 @@ class JobQueue {
         this.start();
     }
 
-    intervalId
+    intervalId: NodeJS.Timer;
     intervalMillis: number = 10;
 
     start(): void {
@@ -441,23 +435,26 @@ class JobQueue {
         var linkMarkdownFile = path.join(tempDir, 'JenkinsJob_' + rootJob.name + '_' + rootJob.executableNumber + '.md');
         tl.debug('markdown location: ' + linkMarkdownFile);
         var tab: string = "  ";
-        var markdownContents = walkHierarchy(rootJob, "");
+        var paddingTab: number = 4;
+        var markdownContents = walkHierarchy(rootJob, "", 0);
 
-        function walkHierarchy(job: Job, indent: string): string {
-            var jobContents = indent + '<ul>\n';
+        function walkHierarchy(job: Job, indent: string, padding: number): string {
+            var jobContents = indent + '<ul style="padding-left:' + padding + '">\n';
+
+            // if this job was joined to another follow that one instead
+            job = job.getState() == JobState.Joined ? job.joinedJob : job;
             var jobState: JobState = job.getState();
+
             if (jobState == JobState.Done || jobState == JobState.Queued) {
-                jobContents += indent + '[' + job.name + ' #' + job.executableNumber + '](' + job.executableUrl + ')<br>\n';
-            } else if (jobState == JobState.Joined) {
-                jobContents += indent + '[' + job.joinedJob.name + ' #' + job.joinedJob.executableNumber + '](' + job.joinedJob.executableUrl + ')<br>\n';
+                jobContents += indent + '[' + job.name + ' #' + job.executableNumber + '](' + job.executableUrl + ') ' + job.getResultString() + '<br>\n';
             } else {
-                console.log('Warning ' + job + ' is still in active state');
+                console.log('Warning: ' + job + ' is still in active state');
             }
 
             var childContents = "";
             for (var i in job.childrenJobs) {
                 var child = job.childrenJobs[i];
-                childContents += walkHierarchy(child, indent + tab);
+                childContents += walkHierarchy(child, indent + tab, padding + paddingTab);
             }
 
             return jobContents + childContents + indent + '</ul>\n';
@@ -480,25 +477,32 @@ class JobQueue {
 
 var jobQueue: JobQueue;
 
-function createLinkAndFinish(job: Job, finalJobState: JobState) {
-    var tempDir = shell.tempdir();
-    var linkMarkdownFile = path.join(tempDir, 'JenkinsJob_' + job.name + '_' + job.executableNumber + '.md');
-    job.debug('jenkinsLink: ' + linkMarkdownFile);
-    var summaryTitle = job.getSummaryTitle(finalJobState);
-    job.debug('summaryTitle: ' + summaryTitle);
-    var markdownContents = '[' + job.executableUrl + '](' + job.executableUrl + ')';
-
-    fs.writeFile(linkMarkdownFile, markdownContents, function callBack(err) {
-        tl.debug('createLinkAndFinish().writeFile().callback()');
-
-        if (err) {
-            //don't fail the build -- there just won't be a link
-            job.consoleLog('Error creating link to Jenkins job: ' + err);
-        } else {
-            job.consoleLog('##vso[task.addattachment type=Distributedtask.Core.Summary;name=' + summaryTitle + ';]' + linkMarkdownFile);
+function joinIfPossible(job: Job): boolean {
+    if (job.getState() == JobState.Joined) {
+        return true; // already joined
+    }
+    for (var i in jobQueue.jobs) {
+        var aJob = jobQueue.jobs[i];
+        if (aJob.parentJob == null || aJob == job || aJob.name != job.name) {
+            continue;  // can't join with root, self, or a job with a different name
         }
+        if (aJob.getState() == JobState.Streaming || aJob.getState() == JobState.Done) {
+            // can only join with something that is running or already ran
 
-    });
+            // search causes after the first one (since the first determines the master job)
+            var joinedCauses = aJob.parsedCauses.length > 1 ? aJob.parsedCauses.slice(1) : [];
+            for (var j in joinedCauses) {
+                var cause = joinedCauses[j];
+                var aCauseJob = jobQueue.findJob(cause.upstreamProject, cause.upstreamBuild);
+                if (aCauseJob == job.parentJob) {
+                    //finally, if the cause is the job's parent, then it should be joined
+                    job.setJoined(aJob);
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 
@@ -511,20 +515,31 @@ function createLinkAndFinish(job: Job, finalJobState: JobState) {
  */
 function locateChildExecutionBuildNumber(job: Job) {
     tl.debug('locateChildExecutionBuildNumber()');
-
+    if (joinIfPossible(job)) {
+        // another callback joined this job
+        console.log('found that bug 1');
+        job.stopWork(0, job.state);
+    }
     var url = addUrlSegment(job.taskUrl, job.nextSearchBuildNumber + "/api/json");
     job.debug('pipeline, locating child execution URL:' + url);
     request.get({ url: url }, function requestCallback(err, httpResponse, body) {
         tl.debug('locateChildExecutionBuildNumber().requestCallback()');
-
-        if (err) {
+        if (joinIfPossible(job)) {
+            // another callback joined this job
+            console.log('found that bug 2');
+            job.stopWork(0, job.state);
+        } else if (err) {
             failError(err);
         } else if (httpResponse.statusCode == 404) {
             // This job doesn't exist -- do we expect it to in the near future because it has been queued?
             job.debug('404 for: ' + job.name + ':' + job.nextSearchBuildNumber);
             job.debug('checking if it is in the queue');
             job.refreshJobTask(job, function refreshJobTaskCallback() {
-                if (job.parsedTaskBody.inQueue || job.parsedTaskBody.lastCompletedBuild >= job.nextSearchBuildNumber) {
+                if (joinIfPossible(job)) {
+                    // another callback joined this job
+                    console.log('found that bug 3');
+                    job.stopWork(0, job.state);
+                } else if (job.parsedTaskBody.inQueue || job.parsedTaskBody.lastCompletedBuild >= job.nextSearchBuildNumber) {
                     //see if it's in the queue, or maybe it just ran right after we first checked
                     job.debug('job has been queued, continue searching');
                     job.stopWork(pollInterval, job.state);
@@ -551,7 +566,7 @@ function locateChildExecutionBuildNumber(job: Job) {
             var firstCauseJob = jobQueue.findJob(cause.upstreamProject, cause.upstreamBuild);
             if (firstCauseJob == job.parentJob) {
                 // found it; mark it running, and start grabbing the console
-                job.setStreaming(job.nextSearchBuildNumber);
+                job.setStreaming(causes, job.nextSearchBuildNumber);
 
                 //join all other siblings to this same job
                 var joinedCauses = causes.length > 1 ? causes.slice(1) : [];
