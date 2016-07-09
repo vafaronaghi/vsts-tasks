@@ -67,14 +67,14 @@ function fail(message: string): void {
 }
 
 enum JobState {
-    New,
-    Locating,
-    Streaming,
-    Finishing,
-    Done,
-    Joined,
-    Queued,
-    Lost
+    New,       // 0
+    Locating,  // 1
+    Streaming, // 2
+    Finishing, // 3
+    Done,      // 4
+    Joined,    // 5
+    Queued,    // 6
+    Lost       // 7
 }
 
 class Job {
@@ -129,9 +129,9 @@ class Job {
                     if (this.parentJob == null) { // root job, can skip Locating
                         if (captureConsole) {
                             this.enableConsole();
-                            this.setStreaming(null, this.executableNumber); // jump to Streaming
+                            this.setStreaming([], this.executableNumber); // jump to Streaming
                         } else {
-                            this.changeState(JobState.Finishing); // also skip Streaming and jump to Finishing
+                            this.changeState(JobState.Queued); // also skip Streaming and jump to Finishing
                         }
                     } else {
                         this.changeState(JobState.Locating); // pipeline jobs
@@ -157,6 +157,9 @@ class Job {
             if (!this.isActive()) {
                 jobQueue.flushJobConsolesSafely();
             }
+            if(jobState == JobState.Done){
+                console.log('Done   :'+this);
+            }
         }
         this.workDelay = delay;
         this.working = false;
@@ -167,6 +170,27 @@ class Job {
         this.state = newState;
         if (oldState != newState) {
             this.debug('state changed from: ' + oldState);
+            var validStateChange = false;
+            if (oldState == JobState.New) {
+                if (newState == JobState.Streaming) {
+                    validStateChange = (this.parentJob == null && captureConsole);
+                } else if (newState == JobState.Queued) {
+                    validStateChange = (this.parentJob == null && !captureConsole);
+                } else {
+                    validStateChange = (newState == JobState.Locating || newState == JobState.Joined);
+                }
+            } else if (oldState == JobState.Locating) {
+                validStateChange = (newState == JobState.Joined || newState == JobState.Streaming);
+            } else if (oldState == JobState.Streaming) {
+                validStateChange = (newState == JobState.Finishing);
+            } else if (oldState == JobState.Finishing) {
+                validStateChange = (newState == JobState.Done);
+            } else if (oldState == JobState.Joined || oldState == JobState.Done) {
+                validStateChange = false; // these are terminal states
+            }
+            if (!validStateChange) {
+                console.log('Warning invalid state change from: ' + oldState + ' ' + this);
+            }
         }
     }
 
@@ -193,7 +217,23 @@ class Job {
         this.consoleLog('******************************************************************************\n');
 
         if (jobQueue.findActiveConsoleJob() == null) {
-            console.log('Jenkins job pending: ' + this.executableUrl);
+            //console.log('Jenkins job pending: ' + this.executableUrl);
+        }
+
+        //join all other siblings to this same job
+        var joinedCauses = causes.length > 1 ? causes.slice(1) : [];
+        for (var i in joinedCauses) {
+            var cause = joinedCauses[i];
+            var causeJob = jobQueue.findJob(cause.upstreamProject, cause.upstreamBuild);
+            if (causeJob != null) { // if it's null, then the cause was triggered outside this pipeline
+                for (var c in causeJob.childrenJobs) {
+                    var child: Job = causeJob.childrenJobs[c];
+                    if (child.name == this.name) {
+                        child.setJoined(this);
+                        console.log('JoinedA:' + child);
+                    }
+                }
+            }
         }
     }
 
@@ -272,7 +312,7 @@ class Job {
                 job.initialSearchBuildNumber = job.parsedTaskBody.lastBuild.number;
             }
             job.nextSearchBuildNumber = job.initialSearchBuildNumber;
-            job.stopWork(0, job.state);
+            job.stopWork(pollInterval, job.state);
         });
     }
 
@@ -305,14 +345,14 @@ class Job {
     }
 
     toString() {
-        var fullMessage = '(Job:' + this.name + ':' + this.executableNumber;
+        var fullMessage = '(' + this.state + ':' + this.name + ':' + this.executableNumber;
         if (this.parentJob != null) {
-            fullMessage += ', parentJob:' + this.parentJob;
+            fullMessage += ', p:' + this.parentJob;
         }
         if (this.joinedJob != null) {
-            fullMessage += ', joinedJob:' + this.joinedJob;
+            fullMessage += ', j:' + this.joinedJob;
         }
-        fullMessage += ', state:' + this.state + ')';
+        fullMessage += ')';
         return fullMessage;
     }
 }
@@ -398,7 +438,7 @@ class JobQueue {
             } else if (addedToConsole) {
                 for (var i in streamingJobs) {
                     var job = streamingJobs[i];
-                    console.log('Jenkins job pending: ' + job.executableUrl);
+                    //console.log('Jenkins job pending: ' + job.executableUrl);
                 }
             }
         }
@@ -448,7 +488,7 @@ class JobQueue {
             if (jobState == JobState.Done || jobState == JobState.Queued) {
                 jobContents += indent + '[' + job.name + ' #' + job.executableNumber + '](' + job.executableUrl + ') ' + job.getResultString() + '<br>\n';
             } else {
-                console.log('Warning: ' + job + ' is still in active state');
+                console.log('Warning, still in active state: ' + job);
             }
 
             var childContents = "";
@@ -477,8 +517,15 @@ class JobQueue {
 
 var jobQueue: JobQueue;
 
+function joinAllPossible() {
+    for (var i in jobQueue.jobs) {
+        var job = jobQueue.jobs[i];
+        joinIfPossible(job);
+    }
+}
+
 function joinIfPossible(job: Job): boolean {
-    if (job.getState() == JobState.Joined) {
+    if (job.getState() != JobState.Locating && job.getState() != JobState.Lost) {
         return true; // already joined
     }
     for (var i in jobQueue.jobs) {
@@ -497,6 +544,7 @@ function joinIfPossible(job: Job): boolean {
                 if (aCauseJob == job.parentJob) {
                     //finally, if the cause is the job's parent, then it should be joined
                     job.setJoined(aJob);
+                    console.log('JoinedB:' + job);
                     return true;
                 }
             }
@@ -515,18 +563,17 @@ function joinIfPossible(job: Job): boolean {
  */
 function locateChildExecutionBuildNumber(job: Job) {
     tl.debug('locateChildExecutionBuildNumber()');
-    if (joinIfPossible(job)) {
-        // another callback joined this job
-        console.log('found that bug 1');
+    if (job.getState() != JobState.Locating || joinIfPossible(job)) {
+        // another callback joined or started this job
         job.stopWork(0, job.state);
+        return;
     }
     var url = addUrlSegment(job.taskUrl, job.nextSearchBuildNumber + "/api/json");
     job.debug('pipeline, locating child execution URL:' + url);
     request.get({ url: url }, function requestCallback(err, httpResponse, body) {
         tl.debug('locateChildExecutionBuildNumber().requestCallback()');
-        if (joinIfPossible(job)) {
-            // another callback joined this job
-            console.log('found that bug 2');
+        if (job.getState() != JobState.Locating || joinIfPossible(job)) {
+            // another callback joined or started this job
             job.stopWork(0, job.state);
         } else if (err) {
             failError(err);
@@ -535,16 +582,19 @@ function locateChildExecutionBuildNumber(job: Job) {
             job.debug('404 for: ' + job.name + ':' + job.nextSearchBuildNumber);
             job.debug('checking if it is in the queue');
             job.refreshJobTask(job, function refreshJobTaskCallback() {
-                if (joinIfPossible(job)) {
-                    // another callback joined this job
-                    console.log('found that bug 3');
+                if (job.getState() != JobState.Locating || joinIfPossible(job)) {
+                    // another callback joined or started this job
                     job.stopWork(0, job.state);
                 } else if (job.parsedTaskBody.inQueue || job.parsedTaskBody.lastCompletedBuild >= job.nextSearchBuildNumber) {
                     //see if it's in the queue, or maybe it just ran right after we first checked
                     job.debug('job has been queued, continue searching');
                     job.stopWork(pollInterval, job.state);
                 } else {
-                    job.stopWork(pollInterval, JobState.Lost);
+                    console.log('restarting search for:' + job);
+                    job.nextSearchBuildNumber = job.initialSearchBuildNumber;
+                    job.searchDirection = -1;
+                    job.stopWork(pollInterval, job.state);
+                    //job.stopWork(pollInterval, JobState.Lost);
                 }
             });
         } else if (httpResponse.statusCode != 200) {
@@ -562,46 +612,51 @@ function locateChildExecutionBuildNumber(job: Job) {
              * all others are considered joined and will not be tracked further.
              */
             var causes = parsedBody.actions[0].causes;
-            var cause = causes[0];
-            var firstCauseJob = jobQueue.findJob(cause.upstreamProject, cause.upstreamBuild);
-            if (firstCauseJob == job.parentJob) {
-                // found it; mark it running, and start grabbing the console
-                job.setStreaming(causes, job.nextSearchBuildNumber);
-
-                //join all other siblings to this same job
-                var joinedCauses = causes.length > 1 ? causes.slice(1) : [];
-                for (var i in joinedCauses) {
-                    cause = joinedCauses[i];
-                    var causeJob = jobQueue.findJob(cause.upstreamProject, cause.upstreamBuild);
-                    if (causeJob != null) {
-                        for (var c in causeJob.childrenJobs) {
-                            var child: Job = causeJob.childrenJobs[c];
-                            if (child.name == job.name) {
-                                child.setJoined(job);
+            var firstCauseJob = jobQueue.findJob(causes[0].upstreamProject, causes[0].upstreamBuild);
+            if (firstCauseJob != null) {
+                //The job we found is part of the pipeline!
+                if (firstCauseJob == job.parentJob) {
+                    // this one.  mark it running, and start grabbing the console, and join others to it
+                    job.setStreaming(causes, job.nextSearchBuildNumber);
+                    job.stopWork(pollInterval, job.state);
+                    return;
+                } else {
+                    // not this one, so, find it!
+                    for (var i in firstCauseJob.childrenJobs) {
+                        var otherJob = firstCauseJob.childrenJobs[i];
+                        if (otherJob.name == job.name) {
+                            //found it -- so kick it off to run instead (which will may or may not cause this one to join with it)
+                            if (otherJob.getState() != JobState.Streaming && otherJob.getState() != JobState.Done) {
+                                otherJob.setStreaming(causes, job.nextSearchBuildNumber);
                             }
                         }
                     }
-                }
-            } else if (job.getState() == JobState.Locating) {
-                // need to keep searching
-                job.debug('Search failed for: ' + job.name + ':' + job.nextSearchBuildNumber + ' triggered by :' + job.parentJob.name + ':' + job.parentJob.parsedExecutionResult.number);
-                if (job.searchDirection < 0) { // search backwards
-                    if (parsedBody.timestamp <= job.parentJob.parsedExecutionResult.timestamp || job.nextSearchBuildNumber == 1) {
-                        // we already searched backwards as far as possible, 
-                        // so start searching forwards from the begining
-                        job.debug('changing search direction');
-                        job.nextSearchBuildNumber = job.initialSearchBuildNumber + 1;
-                        job.searchDirection = 1;
-                    } else { // search backwards one
-                        job.debug('searching back one');
-                        job.nextSearchBuildNumber--;
+                    if (job.getState() == JobState.Joined) {
+                        // great, this job joined with the other one.
+                        job.stopWork(0, job.state);
+                        return;
                     }
-                } else { // search forwards one
-                    job.debug('searching forward one');
-                    job.nextSearchBuildNumber++;
+
                 }
             }
-            job.stopWork(0, job.state);
+            // need to keep searching
+            job.debug('Search failed for: ' + job.name + ':' + job.nextSearchBuildNumber + ' triggered by :' + job.parentJob.name + ':' + job.parentJob.parsedExecutionResult.number);
+            if (job.searchDirection < 0) { // search backwards
+                if (parsedBody.timestamp <= job.parentJob.parsedExecutionResult.timestamp || job.nextSearchBuildNumber == 1) {
+                    // we already searched backwards as far as possible, 
+                    // so start searching forwards from the begining
+                    job.debug('changing search direction');
+                    job.nextSearchBuildNumber = job.initialSearchBuildNumber + 1;
+                    job.searchDirection = 1;
+                } else { // search backwards one
+                    job.debug('searching back one');
+                    job.nextSearchBuildNumber--;
+                }
+            } else { // search forwards one
+                job.debug('searching forward one');
+                job.nextSearchBuildNumber++;
+            }
+            job.stopWork(pollInterval, job.state);
         }
     });
 }
