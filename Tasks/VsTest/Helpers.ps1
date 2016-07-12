@@ -29,21 +29,45 @@ function ShouldAddDiagFlag {
 
 	$inDebugMode = [system.boolean] (Get-ChildItem -path env:system_debug -erroraction silent)
 	
-	if($inDebugMode -eq $true) {
-		
+	if($inDebugMode -eq $true) 
+	{
+
 		$hasDiagFileNameParam = InvokeVsTestCmdletHasMember -memberName "DiagFileName"
 
-		if($hasDiagFileNameParam) {
-			if ([string]::IsNullOrWhiteSpace($vsTestVersion)) {
-				$vsTestVersion = Get-VSVersion
+		if($hasDiagFileNameParam)
+		{
+			if ([string]::IsNullOrWhiteSpace($vsTestVersion)) 
+			{
+				$vsVersion = Get-VSVersion
 			}
 			
-			$version = [int]($vsTestVersion)
-			if($version -ge 15) {
-				return $true
+			$version = [int]($vsVersion)
+			if($version -ge 15) 
+			{
+				return CheckFileVersion -vstestConsoleExePath "$env:VS150COMNTools\..\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe"
+				
 			}
 		}
 	} 
+
+	return $false
+}
+
+function CheckFileVersion {
+	[cmdletbinding()]
+	[OutputType([System.Boolean])]
+	param(
+		[string]$vstestConsoleExePath
+	)
+
+	if(Test-Path -Path $vstestConsoleExePath) 
+	{
+		$vstestConsoleExeVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($vstestConsoleExePath)
+		if($vstestConsoleExeVersion.ProductMajorPart == 15 -and $vstestConsoleExeVersion.ProductBuildPart >= 25123)
+		{
+			return $true
+		}
+	}
 
 	return $false
 }

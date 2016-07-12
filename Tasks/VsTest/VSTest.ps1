@@ -137,7 +137,10 @@ try
         Write-Host "##vso[task.logissue type=warning;code=002004;]"
         Write-Warning (Get-LocalizedString -Key "No test assemblies found matching the pattern: '{0}'." -ArgumentList $testAssembly)
     }
-    ##vso[task.uploadlog]$diagFileName
+    
+    Write-Host "##vso[task.uploadlog]$diagFileName"
+
+    Remove-Item -Path $diagFileName -ErrorAction SilentlyContinue
 }
 catch
 {

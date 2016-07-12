@@ -134,6 +134,14 @@ describe('VsTest Suite', function () {
         it('(EnableDiagCheckReturnsTrueIfConditionsMet) diag flag should be used if vsversion>=15 and in debug mode', (done) => {
             psr.run(path.join(__dirname, 'EnableDiagCheckReturnsTrueIfConditionsMet.ps1'), done);
         })
+
+        it('(EnableDiagCheckReturnsFalseIfCmdletDoesntHaveParam) diag flag should be used if cmdlet does not have that option', (done) => {
+            psr.run(path.join(__dirname, 'EnableDiagCheckReturnsFalseIfCmdletDoesntHaveParam.ps1'), done);
+        })
+
+        it('(EnableDiagCheckReturnsFalseIfFileversionIsIncorect) diag flag should not be used if file version is < update3', (done) => {
+            psr.run(path.join(__dirname, 'EnableDiagCheckReturnsFalseIfFileversionIsIncorect.ps1'), done);
+        })
     }
 
     if (!os.type().match(/^Win/)) {
