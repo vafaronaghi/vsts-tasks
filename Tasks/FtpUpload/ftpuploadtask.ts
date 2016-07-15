@@ -7,25 +7,10 @@ import tl = require('vsts-task-lib/task');
 import url = require('url');
 import Q = require('q');
 
-import ftputils = require('./ftputils');
-
 var SortedSet = require('collections/sorted-set');
 var Client = require('ftp');
 
-var win = tl.osType().match(/^Win/);
-tl.debug('win: ' + win);
-
-var repoRoot: string = tl.getVariable('build.sourcesDirectory');
-function makeAbsolute(normalizedPath: string): string {
-    tl.debug('makeAbsolute:' + normalizedPath);
-
-    var result = normalizedPath;
-    if (!path.isAbsolute(normalizedPath)) {
-        result = path.join(repoRoot, normalizedPath);
-        tl.debug('Relative file path: ' + normalizedPath + ' resolving to: ' + result);
-    }
-    return result;
-}
+import ftputils = require('./ftputils');
 
 // server endpoint
 var serverEndpoint = tl.getInput('serverEndpoint', true);
@@ -35,15 +20,30 @@ var serverEndpointAuth = tl.getEndpointAuthorization(serverEndpoint, false);
 var username = serverEndpointAuth['parameters']['username'];
 var password = serverEndpointAuth['parameters']['password'];
 
-// the root location which will be uploaded from
-var rootFolder: string = makeAbsolute(path.normalize(tl.getPathInput('rootFolder', true).trim()));
-if (!tl.exist(rootFolder)) {
-    failTask('The specified root folder does not exist: ' + rootFolder);
-}
+// other standard options
+var rootFolder: string = tl.getPathInput('rootFolder', true);
+var filePatterns: string[] = tl.getDelimitedInput('filePatterns', '\n', true);
+var remotePath = tl.getInput('remotePath', true).trim();
 
+// advanced options
 var clean: boolean = tl.getBoolInput('clean', true);
 var overwrite: boolean = tl.getBoolInput('overwrite', true);
 var preservePaths: boolean = tl.getBoolInput('preservePaths', true);
+
+// progress tracking
+var progressFilesUploaded: number = 0;
+var progressFilesSkipped: number = 0; // already exists and overwrite mode off
+var progressDirectoriesProcessed: number = 0;
+
+var files = findFiles();
+tl.debug('number of files to upload: ' + files.length);
+tl.debug('files to upload: ' + JSON.stringify(files));
+
+var ftpClient = new Client();
+var ftpHelper = new ftputils.FtpHelper(ftpClient);
+
+var win = tl.osType().match(/^Win/);
+tl.debug('win: ' + win);
 
 function findFiles(): string[] {
     tl.debug('Searching for files to upload');
@@ -58,7 +58,6 @@ function findFiles(): string[] {
     var allFiles = tl.find(rootFolder);
 
     // filePatterns is a multiline input containing glob patterns
-    var filePatterns: string[] = tl.getDelimitedInput('filePatterns', '\n', true);
     tl.debug('searching for files using: ' + filePatterns.length + ' filePatterns: ' + filePatterns);
 
     // minimatch options
@@ -103,26 +102,13 @@ function findFiles(): string[] {
     return matchingFilesSet.sorted();
 }
 
-var remotePath = tl.getInput('remotePath', true).trim();
-
-var filesUploaded: number = 0;
-var filesSkipped: number = 0; // already exists and overwrite mode off
-var directoriesProcessed: number = 0;
-
-var files = findFiles();
-tl.debug('number of files to upload: ' + files.length);
-tl.debug('files to upload: ' + JSON.stringify(files));
-
-var ftpClient = new Client();
-var ftpHelper = new ftputils.FtpHelper(ftpClient);
-
-function printStatus(message: string): void {
-    var total: number = filesUploaded + filesSkipped + directoriesProcessed;
+function printProgress(message: string): void {
+    var total: number = progressFilesUploaded + progressFilesSkipped + progressDirectoriesProcessed;
     var remaining: number = files.length - total + 1; // add one for the root remotePath
     console.log(
-        'files uploaded: ' + filesUploaded +
-        ', files skipped: ' + filesSkipped +
-        ', directories processed: ' + directoriesProcessed +
+        'files uploaded: ' + progressFilesUploaded +
+        ', files skipped: ' + progressFilesSkipped +
+        ', directories processed: ' + progressDirectoriesProcessed +
         ', total: ' + total + ', remaining: ' + remaining +
         ', ' + message);
 }
@@ -130,14 +116,14 @@ function printStatus(message: string): void {
 function getFinalStatusMessage(): string {
     return '\nhost: ' + serverEndpointUrl.host +
         '\npath: ' + remotePath +
-        '\nfiles uploaded: ' + filesUploaded +
-        '\nfiles skipped: ' + filesSkipped +
-        '\ndirectories processed: ' + directoriesProcessed;
+        '\nfiles uploaded: ' + progressFilesUploaded +
+        '\nfiles skipped: ' + progressFilesSkipped +
+        '\ndirectories processed: ' + progressDirectoriesProcessed;
 }
 
 function failTask(message: string) {
     if (files) {
-        var total: number = filesUploaded + filesSkipped + directoriesProcessed;
+        var total: number = progressFilesUploaded + progressFilesSkipped + progressDirectoriesProcessed;
         var remaining: number = files.length - total;
         message = message + getFinalStatusMessage() + '\nunprocessed files & directories: ' + remaining;
     }
@@ -171,7 +157,6 @@ function cleanRemoteIfRequired(): Q.Promise<void> {
     return defer.promise;
 }
 
-
 async function uploadFiles() {
     tl.debug('connected to ftp host:' + serverEndpointUrl.host);
 
@@ -183,8 +168,8 @@ async function uploadFiles() {
         var promises = [];
         var nestedPromises = [];
         promises.push(ftpHelper.createRemoteDirectory(remotePath).then(() => {
-            directoriesProcessed++;
-            printStatus('remote directory successfully created/verified: ' + remotePath);
+            progressDirectoriesProcessed++;
+            printProgress('remote directory successfully created/verified: ' + remotePath);
         })); // ensure root remote location exists
 
         files.forEach((file) => {
@@ -199,25 +184,25 @@ async function uploadFiles() {
             var stats = tl.stats(file);
             if (stats.isDirectory()) { // create directories if necessary
                 promises.push(ftpHelper.createRemoteDirectory(remoteFile).then(() => {
-                    directoriesProcessed++;
-                    printStatus('remote directory successfully created/verified: ' + remoteFile);
+                    progressDirectoriesProcessed++;
+                    printProgress('remote directory successfully created/verified: ' + remoteFile);
                 }));
             } else if (stats.isFile()) { // upload files
                 if (overwrite) {
                     promises.push(ftpHelper.uploadFile(file, remoteFile).then(() => {
-                        filesUploaded++;
-                        printStatus('successfully uploaded: ' + file + ' to: ' + remoteFile);
+                        progressFilesUploaded++;
+                        printProgress('successfully uploaded: ' + file + ' to: ' + remoteFile);
                     }));
                 } else {
                     promises.push(ftpHelper.remoteExists(remoteFile).then((exists: boolean) => {
                         if (!exists) {
                             nestedPromises.push(ftpHelper.uploadFile(file, remoteFile).then(() => {
-                                filesUploaded++;
-                                printStatus('successfully uploaded: ' + file + ' to: ' + remoteFile);
+                                progressFilesUploaded++;
+                                printProgress('successfully uploaded: ' + file + ' to: ' + remoteFile);
                             }));
                         } else {
-                            filesSkipped++;
-                            printStatus('skipping file: ' + file + ' remote: ' + remoteFile + ' because it already exists');
+                            progressFilesSkipped++;
+                            printProgress('skipping file: ' + file + ' remote: ' + remoteFile + ' because it already exists');
                         }
                     }));
                 }

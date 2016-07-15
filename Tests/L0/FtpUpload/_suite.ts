@@ -67,6 +67,44 @@ describe(jobName + ' Suite', function () {
                     done(err);
                 });
         });
+        it(os + ' check args: no filePatterns', (done) => {
+            setResponseFile(responseFile);
+
+            var tr = new trm.TaskRunner(jobName, true);
+            tr.setInput('serverEndpoint', 'ID1');
+            tr.setInput('rootFolder', 'rootFolder');
+
+            tr.run()
+                .then(() => {
+                    assert(tr.stderr.indexOf('Input required: filePatterns') != -1, 'should have written to stderr');
+                    assert(tr.failed, 'task should have failed');
+                    done();
+                })
+                .fail((err) => {
+                    console.log(err)
+                    done(err);
+                });
+        });
+
+        it(os + ' check args: no remotePath', (done) => {
+            setResponseFile(responseFile);
+
+            var tr = new trm.TaskRunner(jobName, true);
+            tr.setInput('serverEndpoint', 'ID1');
+            tr.setInput('rootFolder', 'rootFolder');
+            tr.setInput('filePatterns', '**');
+
+            tr.run()
+                .then(() => {
+                    assert(tr.stderr.indexOf('Input required: remotePath') != -1, 'should have written to stderr');
+                    assert(tr.failed, 'task should have failed');
+                    done();
+                })
+                .fail((err) => {
+                    console.log(err)
+                    done(err);
+                });
+        });
 
         it(os + ' check args: no clean', (done) => {
             setResponseFile(responseFile);
@@ -74,6 +112,8 @@ describe(jobName + ' Suite', function () {
             var tr = new trm.TaskRunner(jobName, true);
             tr.setInput('serverEndpoint', 'ID1');
             tr.setInput('rootFolder', 'rootFolder');
+            tr.setInput('filePatterns', '**');
+            tr.setInput('remotePath', '/upload/');
 
             tr.run()
                 .then(() => {
@@ -92,6 +132,8 @@ describe(jobName + ' Suite', function () {
             var tr = new trm.TaskRunner(jobName, true);
             tr.setInput('serverEndpoint', 'ID1');
             tr.setInput('rootFolder', 'rootFolder');
+            tr.setInput('filePatterns', '**');
+            tr.setInput('remotePath', '/upload/');
             tr.setInput('clean', 'true');
 
             tr.run()
@@ -111,6 +153,8 @@ describe(jobName + ' Suite', function () {
             var tr = new trm.TaskRunner(jobName, true);
             tr.setInput('serverEndpoint', 'ID1');
             tr.setInput('rootFolder', 'rootFolder');
+            tr.setInput('filePatterns', '**');
+            tr.setInput('remotePath', '/upload/');
             tr.setInput('clean', 'true');
             tr.setInput('overwrite', 'true');
 
@@ -125,60 +169,17 @@ describe(jobName + ' Suite', function () {
                     done(err);
                 });
         });
-        it(os + ' check args: no remotePath', (done) => {
-            setResponseFile(responseFile);
-
-            var tr = new trm.TaskRunner(jobName, true);
-            tr.setInput('serverEndpoint', 'ID1');
-            tr.setInput('rootFolder', 'rootFolder');
-            tr.setInput('clean', 'true');
-            tr.setInput('overwrite', 'true');
-            tr.setInput('preservePaths', 'true');
-
-            tr.run()
-                .then(() => {
-                    assert(tr.stderr.indexOf('Input required: remotePath') != -1, 'should have written to stderr');
-                    assert(tr.failed, 'task should have failed');
-                    done();
-                })
-                .fail((err) => {
-                    console.log(err)
-                    done(err);
-                });
-        });
-        it(os + ' check args: no filePatterns', (done) => {
-            setResponseFile(responseFile);
-
-            var tr = new trm.TaskRunner(jobName, true);
-            tr.setInput('serverEndpoint', 'ID1');
-            tr.setInput('rootFolder', 'rootFolder');
-            tr.setInput('clean', 'true');
-            tr.setInput('overwrite', 'true');
-            tr.setInput('preservePaths', 'true');
-            tr.setInput('remotePath', '/upload/');
-
-            tr.run()
-                .then(() => {
-                    assert(tr.stderr.indexOf('Input required: filePatterns') != -1, 'should have written to stderr');
-                    assert(tr.failed, 'task should have failed');
-                    done();
-                })
-                .fail((err) => {
-                    console.log(err)
-                    done(err);
-                });
-        });
         it(os + ' check args: bogusURL', (done) => {
             setResponseFile(responseFile);
 
             var tr = new trm.TaskRunner(jobName, true);
             tr.setInput('serverEndpoint', 'ID1');
             tr.setInput('rootFolder', 'rootFolder');
+            tr.setInput('filePatterns', '**');
+            tr.setInput('remotePath', '/upload/');
             tr.setInput('clean', 'true');
             tr.setInput('overwrite', 'true');
             tr.setInput('preservePaths', 'true');
-            tr.setInput('remotePath', '/upload/');
-            tr.setInput('filePatterns', '*');
 
             tr.run()
                 .then(() => {

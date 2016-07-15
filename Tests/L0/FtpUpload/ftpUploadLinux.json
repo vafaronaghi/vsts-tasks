@@ -8,20 +8,20 @@
         "build.sourcesDirectory": "/"
     },
     "exist" : {
-        "/rootFolder": true
+        "rootFolder": true
     },
     "find": {
-        "/rootFolder": [
-            "/rootFolder/a",
-            "/rootFolder/b",
-            "/rootFolder/c"
+        "rootFolder": [
+            "rootFolder/a",
+            "rootFolder/b",
+            "rootFolder/c"
         ]
     },
     "match": {
         "*": [
-            "/rootFolder/a",
-            "/rootFolder/b",
-            "/rootFolder/c"
+            "rootFolder/a",
+            "rootFolder/b",
+            "rootFolder/c"
         ]
     }
 }
