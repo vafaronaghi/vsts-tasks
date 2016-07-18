@@ -25,6 +25,7 @@
 #region Public Constants
 
 . $PSScriptRoot/PostComments-Server.ps1
+. $PSScriptRoot/../Common/SonarQubeHelpers/SonarQubeHelper.ps1
 
 # Limit the number of issues to be posted to this number
 $PostCommentsModule_MaxMessagesToPost = 100
@@ -115,11 +116,11 @@ function InternalPostAndResolveComments
     
     if (HasElements $remainingMessages )
     {
-         # Debug: print remaining messages 
+         # Debug: print messages that will be injected 
         $remainingMessages | ForEach {Write-VstsTaskVerbose $_} 
         
         $newDiscussionThreads = CreateDiscussionThreads $remainingMessages
-        PostDiscussionThreads $newDiscussionThreads 
+        #PostDiscussionThreads $newDiscussionThreads 
     }
     else
     {
@@ -286,7 +287,7 @@ function FilterMessagesByNumber
     $messages = $messages | Sort-Object Priority | Select-Object -first $PostCommentsModule_MaxMessagesToPost
     $commentsFiltered = $countBefore - $messages.Count
     
-    Write-Host (Get-VstsLocString -Key "Info_PRCA_Filtered_Max" -ArgumentList $commentsFiltered, PostCommentsModule_MaxMessagesToPost)
+    Write-Host (Get-VstsLocString -Key "Info_PRCA_Filtered_Max" -ArgumentList $commentsFiltered, $PostCommentsModule_MaxMessagesToPost)
     
     return $messages
 }
@@ -437,6 +438,12 @@ function CreateDiscussionThreads
         $newThread.Comments = @($discussionComment)
         $discussionThreadCollection.Add($newThread)
         $discussionId--
+
+        DumpObject $newThread
+        Write-Host "Creating a new THREAD right now "
+        
+        [void]$script:discussionClient.CreateThreadAsync($newThread).Result;
+    
     }
     
     return $discussionThreadCollection
@@ -485,46 +492,6 @@ function AddLegacyProperties
         "RightBuffer")
 }
 
-
-#region Common Helpers 
-
-function GetTaskContextVariable
-{
-	param([string][ValidateNotNullOrEmpty()]$varName)
-	return Get-TaskVariable -Context $distributedTaskContext -Name $varName
-}
-
-#
-# C# like assert based on a condition
-# 
-function Assert
-{
-    param ([bool]$condition, [string]$message)
-
-    if (!$condition)
-    {
-        throw $message
-    }
-}
-
-function DumpObject()
-{
-    param ($obj)
-    
-    if ($obj -eq $null)
-    {
-        return "Null"
-    }
-    
-    return ($obj | Format-Table | Out-String)   
-}
-
-function HasElements
-{
-    param ([Array]$arr)
-    
-    return ($arr -ne $null) -and ($arr.Count -gt 0)
-}
 
 #endregion
 

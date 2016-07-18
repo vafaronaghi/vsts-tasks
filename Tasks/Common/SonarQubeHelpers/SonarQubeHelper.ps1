@@ -14,8 +14,8 @@ function EscapeArg
 # Set a variable in a property bag that is accessible by all steps
 # To retrieve the variable use GetTaskContextVariable
 #
-# Remark: The variable is available in the current task via env variables and in
-# subsequent tasks via Get-VstsTaskVariable 
+# Remark: the variable is available in the current task via env variables and in
+# subsequent tasks via Set-VstsTaskVariable 
 function SetTaskContextVariable
 {
     param([string][ValidateNotNullOrEmpty()]$varName, 
@@ -331,4 +331,17 @@ function GetOrFetchSonarQubeVersionString
     Write-Verbose "The SonarQube server version is $versionString"
 
     return $versionString
+}
+
+# For debug purposes, prints out an object and its properties 
+function DumpObject
+{
+    param ($obj)
+    
+    if ($obj -eq $null)
+    {
+        return "Null"
+    }
+    
+    return ($obj | Format-Table | Out-String)   
 }

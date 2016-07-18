@@ -7,13 +7,14 @@
 #
 function InitPostCommentsModule
 {
-    param ([ValidateNotNull()]$vssConnection)
+    #param ([ValidateNotNull()]$vssCredentials)
     
     Write-VstsTaskVerbose "Initializing the PostComments-Module"
     
-    $tfsClientAssemblyDir = GetTaskContextVariable "agent.serveromdirectory"
-    LoadTfsClientAssemblies $tfsClientAssemblyDir
-    InternalInit            
+    ApplyAssemblyRedirect
+    $externalAssemblies = LoadTfsClientAssemblies 
+    LoadWorkardoundsAssembly $externalAssemblies 
+    InternalInit       
 }
 
 #
@@ -34,16 +35,29 @@ function Test-InitPostCommentsModule
     $script:artifactUri = $artifacturi
 }
 
+#
+# The client OM has some assembly binding redirects. Since we're loading the OM dynamically, the redirects must also be applied dynamically. 
+#
+function ApplyAssemblyRedirect
+{
+    Write-VstsTaskVerbose "Applying assembly redirects"
+
+    $OnAssemblyResolve = [System.ResolveEventHandler] {
+        param($sender, $e)
+
+        if ($e.Name -eq "Newtonsoft.Json, Version=6.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed") {
+            return [System.Reflection.Assembly]::LoadFrom((Assert-VstsPath "$(Get-VstsTaskVariable -Name 'Agent.ServerOMDirectory' -Require)\Newtonsoft.Json.dll" -PassThru))
+        }
+
+        return $null
+    }
+
+    [System.AppDomain]::CurrentDomain.add_AssemblyResolve($OnAssemblyResolve)
+}
+
 function InternalInit
 {
-    Write-VstsTaskVerbose "Fetching VSS clients"
-    $script:gitClient = $vssConnection.GetClient("Microsoft.TeamFoundation.SourceControl.WebApi.GitHttpClient")            
-    $script:discussionClient = $vssConnection.GetClient("Microsoft.VisualStudio.Services.CodeReview.Discussion.WebApi.DiscussionHttpClient")    
-    $script:codeReviewClient = $vssConnection.GetClient("Microsoft.VisualStudio.Services.CodeReview.WebApi.CodeReviewHttpClient") 
-        
-    Assert ( $script:gitClient -ne $null ) "Internal error: could not retrieve the GitHttpClient object"
-    Assert ( $script:discussionClient -ne $null ) "Internal error: could not retrieve the DiscussionHttpClient object"
-    Assert ( $script:codeReviewClient -ne $null ) "Internal error: could not retrieve the CodeReviewHttpClient object"
+    GetVssClients
                  
     Write-VstsTaskVerbose "Fetching data from build variables"
     $repositoryId = GetTaskContextVariable "build.repository.id"    
@@ -67,12 +81,40 @@ function InternalInit
     $script:artifactUri = GetArtifactUri $script:pullRequest.CodeReviewId $script:pullRequest.Repository.ProjectReference.Id $pullRequestId
 }
 
+function GetVssClients
+{
+    $endpoint = (Get-VstsEndpoint -Name SystemVssConnection -Require)
+
+    $credentials = New-Object Microsoft.VisualStudio.Services.Common.VssCredentials(
+        (New-Object Microsoft.VisualStudio.Services.Common.WindowsCredential($false)), # Do not use default credentials.
+        (New-Object Microsoft.VisualStudio.Services.OAuth.VssOAuthAccessTokenCredential($endpoint.auth.parameters.AccessToken)),
+        [Microsoft.VisualStudio.Services.Common.CredentialPromptType]::DoNotPrompt)
+
+    Write-Host "Got me some creds"
+
+    $collectionUri = New-Object System.Uri(Get-VstsTaskVariable -Name "System.TeamFoundationCollectionUri" -Require)
+    Write-Host "Got me the coll"
+
+    Write-VstsTaskVerbose "Fetching VSS clients"
+    Write-Host "Getting the services"
+
+    $script:gitClient = New-Object Microsoft.TeamFoundation.SourceControl.WebApi.GitHttpClient($collectionUri, $credentials);
+    Write-Host "GitHttpClient ok"
+    $script:discussionClient = New-Object Microsoft.VisualStudio.Services.CodeReview.Discussion.WebApi.DiscussionHttpClient($collectionUri, $credentials);
+    Write-Host "Discussion Http client ok"   
+    $script:codeReviewClient = New-Object Microsoft.VisualStudio.Services.CodeReview.WebApi.CodeReviewHttpClient($collectionUri, $credentials);
+    Write-Host "Code review http client ok"
+        
+    Assert ( $script:gitClient -ne $null ) "Internal error: could not retrieve the GitHttpClient object"
+    Assert ( $script:discussionClient -ne $null ) "Internal error: could not retrieve the DiscussionHttpClient object"
+    Assert ( $script:codeReviewClient -ne $null ) "Internal error: could not retrieve the CodeReviewHttpClient object"
+}
+
 function LoadTfsClientAssemblies
 {
-    param ([ValidateNotNullOrEmpty()][string]$tfsClientAssemblyDir)   
-                     
-    Write-VstsTaskVerbose "Loading TFS client object model assemblies packaged with the build agent"      
     
+    Write-VstsTaskVerbose "Loading TFS client object model assemblies packaged with the build agent"                     
+      
     $externalAssemblyNames = (             
         "Microsoft.TeamFoundation.Common.dll",
         "Microsoft.TeamFoundation.Core.WebApi.dll",
@@ -82,12 +124,23 @@ function LoadTfsClientAssemblies
         "Microsoft.VisualStudio.Services.CodeReview.WebApi.dll",        
         "Microsoft.VisualStudio.Services.Common.dll",
         "Microsoft.VisualStudio.Services.WebApi.dll")
-       
-    $externalAssemblyPaths = $externalAssemblyNames | foreach { [System.IO.Path]::Combine($tfsClientAssemblyDir, $_)}                        
+    
+    $OMDir = Get-VstsTaskVariable -Name 'Agent.ServerOMDirectory' -Require
+     
+    $externalAssemblyPaths = $externalAssemblyNames | foreach { [System.IO.Path]::Combine($OMDir, $_)}                        
     $externalAssemblyPaths | foreach {Add-Type -Path $_} 
     
     Write-VstsTaskVerbose "Loaded $externalAssemblyPaths"
     
+    return $externalAssemblyPaths
+}
+
+function LoadWorkardoundsAssembly
+{
+    param ($externalAssemblyPaths)
+
+    Write-VstsTaskVerbose "Creating and loading the workarounds assembly"
+
     # Workaround: PowerShell 4 seems to have a problem finding the right method from a list of overloaded .net methods. This is because
     # PS converts variables to its own PSObject type and it then gets confused when trying to coerce the values to determine the right method candidate.
     # To work around this I create a .net helper method that calls the actual helper. The code bellow is built into an temp assembly
@@ -186,9 +239,13 @@ function PostDiscussionThreads
 {
     param ([ValidateNotNull()][Microsoft.VisualStudio.Services.CodeReview.Discussion.WebApi.DiscussionThreadCollection]$threads)
     
+    Write-VstsTaskVerbose "Posting the discussion threads"
+
     $vssJsonThreadCollection = New-Object -TypeName "Microsoft.VisualStudio.Services.WebApi.VssJsonCollectionWrapper[Microsoft.VisualStudio.Services.CodeReview.Discussion.WebApi.DiscussionThreadCollection]" -ArgumentList @(,$threads)
-    [void]$script:discussionClient.CreateThreadsAsync($vssJsonThreadCollection, $null, [System.Threading.CancellationToken]::None).Result
-    
+    Write-Host "!!!!!!!!!!!!!!! 1 HERE"
+    [void]$script:discussionClient.CreateThreadsAsync($vssJsonThreadCollection).Result
+   
+    Write-Host "!!!!!!!!!!!!!!! 2 HERE"
     Write-Host (Get-VstsLocString -Key "Info_PRCA_Posted" -ArgumentList $threads.Count) 
 }
 

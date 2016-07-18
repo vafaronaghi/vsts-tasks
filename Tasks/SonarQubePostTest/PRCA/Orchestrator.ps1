@@ -13,8 +13,9 @@ function HandleCodeAnalysisReporting
              
         $newIssues = FetchAnnotatedNewIssues                
         
-        $vssConnection = GetVssConnection 
-        InitPostCommentsModule $vssConnection
+        #$vssConnection = GetVssConnection
+        #$vssCredentials = Get-VssCredentials 
+        InitPostCommentsModule
         $messages = GetMessagesFromIssues $newIssues
         
         PostAndResolveComments $messages "SonarQube Code Analysis"
@@ -27,13 +28,56 @@ function HandleCodeAnalysisReporting
 
 #region Private 
 
-function GetVssConnection
-{
-    $vssConnection = [Microsoft.TeamFoundation.DistributedTask.Task.Internal.Core.TaskContextHelper]::GetVssConnection($distributedTaskContext); 
-    Assert ( $vssConnection -ne $null ) "Internal error: could not retrieve the VssConnection object"
+# # function GetVssConnection
+# # {
 
-    return $vssConnection
-}
+# #     $vssConnection = [Microsoft.TeamFoundation.DistributedTask.Task.Internal.Core.TaskContextHelper]::GetVssConnection($distributedTaskContext); 
+# #     Assert ( $vssConnection -ne $null ) "Internal error: could not retrieve the VssConnection object"
+
+# #     return $vssConnection
+# # }
+
+# function Get-VssCredentials {
+#     [CmdletBinding()]
+#     param()
+
+#     $endpoint = (Get-VstsEndpoint -Name SystemVssConnection -Require)
+#     Add-Type -LiteralPath (Assert-VstsPath "$(Get-VstsTaskVariable -Name 'Agent.ServerOMDirectory' -Require)\Microsoft.VisualStudio.Services.Common.dll" -PassThru)
+#     try
+#     {   
+#         Add-Type -LiteralPath (Assert-VstsPath "$(Get-VstsTaskVariable -Name 'Agent.ServerOMDirectory' -Require)\Microsoft.VisualStudio.Services.Client.dll" -PassThru)
+#     } 
+#     catch [System.Reflection.ReflectionTypeLoadException] {
+#         Write-Host "!!!! Exception !!!! "
+#         if ($_.Exception.LoaderExceptions.Count -eq 1 -and
+#             $_.Exception.LoaderExceptions[0] -is [System.IO.FileNotFoundException] -and
+#             $_.Exception.LoaderExceptions[0].FileName -eq 'Microsoft.ServiceBus, Version=2.5.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35') {
+
+#             # TODO: Consider bundling Microsoft.ServiceBus.dll with the lib (approx 3.75mb).
+
+#             # The 1.x Windows agent did not layout Microsoft.ServiceBus.dll. Fallback to
+#             # the old way of authenticating. For on-premises TFS, this appears to 401 when
+#             # attempting to use the "WRAP access_token" and falls back to NTLM.
+#             return New-Object Microsoft.VisualStudio.Services.Common.VssCredentials(
+#                 (New-Object Microsoft.VisualStudio.Services.Common.WindowsCredential($true)), # Use default credentials.
+#                 (New-Object Microsoft.VisualStudio.Services.Common.VssServiceIdentityCredential(New-Object Microsoft.VisualStudio.Services.Common.VssServiceIdentityToken([string]$endpoint.auth.parameters.AccessToken))),
+#                 [Microsoft.VisualStudio.Services.Common.CredentialPromptType]::DoNotPrompt)
+#         }
+
+#         throw # Rethrow.
+#     }
+
+
+#     $creds =  New-Object Microsoft.VisualStudio.Services.Common.VssCredentials(
+#         (New-Object Microsoft.VisualStudio.Services.Common.WindowsCredential($false)), # Do not use default credentials.
+#         (New-Object Microsoft.VisualStudio.Services.Client.VssOAuthCredential($endpoint.auth.parameters.AccessToken)),
+#         [Microsoft.VisualStudio.Services.Common.CredentialPromptType]::DoNotPrompt)
+       
+#     Write-Host "CREDS available"
+
+#     return $creds
+# }
+
 
 #
 # The issues, as reported by SonarQube, need to be transformed to a simpler structure that the PostComments module can consume
