@@ -71,7 +71,7 @@ export class FtpHelper {
         return defer.promise;
     }
 
-    rmdir(remotePath): Q.Promise<void> {
+    rmdir(remotePath: string): Q.Promise<void> {
         var defer: Q.Deferred<void> = Q.defer<void>();
 
         tl.debug('removing remote directory: ' + remotePath);
@@ -85,5 +85,13 @@ export class FtpHelper {
         });
 
         return defer.promise;
+    }
+
+    async cleanRemote(remotePath: string) {
+        tl.debug('cleaning remote directory: ' + remotePath);
+
+        if (await this.remoteExists(remotePath)) {
+            await this.rmdir(remotePath);
+        }
     }
 }

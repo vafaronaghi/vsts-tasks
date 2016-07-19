@@ -125,104 +125,127 @@ function failTask(message: string) {
     if (files) {
         var total: number = progressFilesUploaded + progressFilesSkipped + progressDirectoriesProcessed;
         var remaining: number = files.length - total;
-        message = message + getFinalStatusMessage() + '\nunprocessed files & directories: ' + remaining;
+        console.log('FTP upload failed: ' + message + getFinalStatusMessage() + '\nunprocessed files & directories: ' + remaining);
     }
     tl.setResult(tl.TaskResult.Failed, message);
 }
 
-function cleanRemoteIfRequired(): Q.Promise<void> {
+function uploadFiles(): Q.Promise<void> {
+    tl.debug('uploading files');
+
     var defer: Q.Deferred<void> = Q.defer<void>();
 
-    if (clean) {
-        var cleanPromises = [];
-        var nestedCleanPromises = [];
+    var outerPromises: Q.Promise<void>[] = []; // these run first, and their then clauses add more promises to innerPromises
+    var innerPromises: Q.Promise<void>[] = [];
+    outerPromises.push(ftpHelper.createRemoteDirectory(remotePath).then(() => {
+        progressDirectoriesProcessed++;
+        printProgress('remote directory successfully created/verified: ' + remotePath);
+    })); // ensure root remote location exists
 
-        tl.debug('cleaning remote: ' + remotePath);
-        cleanPromises.push(ftpHelper.remoteExists(remotePath).then((exists: boolean) => {
-            if (exists) {
-                nestedCleanPromises.push(ftpHelper.rmdir(remotePath));
+    files.forEach((file) => {
+        tl.debug('file: ' + file);
+        var remoteFile: string = preservePaths ?
+            path.join(remotePath, file.substring(rootFolder.length)) :
+            path.join(remotePath, path.basename(file));
+
+        remoteFile = remoteFile.replace(/\\/gi, "/"); // use forward slashes always
+        tl.debug('remoteFile: ' + remoteFile);
+
+        var stats = tl.stats(file);
+        if (stats.isDirectory()) { // create directories if necessary
+            outerPromises.push(ftpHelper.createRemoteDirectory(remoteFile).then(() => {
+                progressDirectoriesProcessed++;
+                printProgress('remote directory successfully created/verified: ' + remoteFile);
+            }));
+        } else if (stats.isFile()) { // upload files
+            if (overwrite) {
+                outerPromises.push(ftpHelper.uploadFile(file, remoteFile).then(() => {
+                    progressFilesUploaded++;
+                    printProgress('successfully uploaded: ' + file + ' to: ' + remoteFile);
+                }));
+            } else {
+                outerPromises.push(ftpHelper.remoteExists(remoteFile).then((exists: boolean) => {
+                    if (!exists) {
+                        innerPromises.push(ftpHelper.uploadFile(file, remoteFile).then(() => {
+                            progressFilesUploaded++;
+                            printProgress('successfully uploaded: ' + file + ' to: ' + remoteFile);
+                        }));
+                    } else {
+                        progressFilesSkipped++;
+                        printProgress('skipping file: ' + file + ' remote: ' + remoteFile + ' because it already exists');
+                    }
+                }));
             }
-        }));
+        }
+    });
 
-        //block until the remote directory is cleaned
-        Q.all(cleanPromises).then(() => {
-            Q.all(nestedCleanPromises).then(() => {
-                defer.resolve(null);
-            }).fail(failTask);
-        }).fail(failTask);
-    } else {
-        defer.resolve(null);
-    }
+    Q.all(outerPromises).then(() => {
+        Q.all(innerPromises).then(() => {
+            defer.resolve(null);
+        }).fail((err) => {
+            defer.reject(err);
+        })
+    }).fail((err) => {
+        defer.reject(err);
+    });
 
     return defer.promise;
 }
 
-async function uploadFiles() {
-    tl.debug('connected to ftp host:' + serverEndpointUrl.host);
+function doWork() {
 
-    tl.debug('files to process: ' + files.length);
+    var uploadSuccessful = false;
 
-    var defer: Q.Deferred<void> = Q.defer<void>();
+    ftpClient.on('greeting', (message: string) => {
+        tl.debug('ftp client greeting');
+        console.log('connected: ' + message);
+    });
 
-    cleanRemoteIfRequired().then(() => {
-        var promises = [];
-        var nestedPromises = [];
-        promises.push(ftpHelper.createRemoteDirectory(remotePath).then(() => {
-            progressDirectoriesProcessed++;
-            printProgress('remote directory successfully created/verified: ' + remotePath);
-        })); // ensure root remote location exists
-
-        files.forEach((file) => {
-            tl.debug('file: ' + file);
-            var remoteFile: string = preservePaths ?
-                path.join(remotePath, file.substring(rootFolder.length)) :
-                path.join(remotePath, path.basename(file));
-
-            remoteFile = remoteFile.replace(/\\/gi, "/"); // use forward slashes always
-            tl.debug('remoteFile: ' + remoteFile);
-
-            var stats = tl.stats(file);
-            if (stats.isDirectory()) { // create directories if necessary
-                promises.push(ftpHelper.createRemoteDirectory(remoteFile).then(() => {
-                    progressDirectoriesProcessed++;
-                    printProgress('remote directory successfully created/verified: ' + remoteFile);
-                }));
-            } else if (stats.isFile()) { // upload files
-                if (overwrite) {
-                    promises.push(ftpHelper.uploadFile(file, remoteFile).then(() => {
-                        progressFilesUploaded++;
-                        printProgress('successfully uploaded: ' + file + ' to: ' + remoteFile);
-                    }));
-                } else {
-                    promises.push(ftpHelper.remoteExists(remoteFile).then((exists: boolean) => {
-                        if (!exists) {
-                            nestedPromises.push(ftpHelper.uploadFile(file, remoteFile).then(() => {
-                                progressFilesUploaded++;
-                                printProgress('successfully uploaded: ' + file + ' to: ' + remoteFile);
-                            }));
-                        } else {
-                            progressFilesSkipped++;
-                            printProgress('skipping file: ' + file + ' remote: ' + remoteFile + ' because it already exists');
-                        }
-                    }));
-                }
+    ftpClient.on('ready', async () => {
+        tl.debug('ftp client ready');
+        try {
+            if (clean) {
+                console.log('cleaning remote directory: ' + remotePath);
+                await ftpHelper.cleanRemote(remotePath);
             }
-        });
 
-        Q.all(promises).then(() => {
-            Q.all(nestedPromises).then(() => {
-                tl.setResult(tl.TaskResult.Succeeded, 'FTP upload successful' + getFinalStatusMessage());
-                ftpClient.end();
-                ftpClient.destroy();
-                defer.resolve(null);
-            }).fail(failTask);
-        }).fail(failTask);
-    }).fail(failTask);
+            console.log('uploading files to remote directory: ' + remotePath);
+            await uploadFiles();
+            uploadSuccessful = true;
+            console.log('FTP upload successful ' + getFinalStatusMessage());
+
+            tl.setResult(tl.TaskResult.Succeeded, 'FTP upload successful');
+        } catch (err) {
+            failTask(err);
+        } finally {
+            console.log('disconnecting from: ', serverEndpointUrl.host);
+            ftpClient.end();
+            ftpClient.destroy();
+        }
+    });
+
+    ftpClient.on('close', (hadErr: boolean) => {
+        console.log('disconnected');
+        tl.debug('ftp client close, hadErr:' + hadErr);
+    });
+
+    ftpClient.on('end', () => {
+        tl.debug('ftp client end');
+    })
+
+    ftpClient.on('error', (err) => {
+        tl.debug('ftp client error, err: ' + err);
+        if (!uploadSuccessful) {
+            // once all files are successfully uploaded, a subsequent error should not fail the task
+            failTask(err);
+        }
+    })
+
+    var secure = serverEndpointUrl.protocol.toLowerCase() == 'ftps:' ? true : false;
+    tl.debug('secure ftp=' + secure);
+
+    console.log('connecting to: ' + serverEndpointUrl.host);
+    ftpClient.connect({ 'host': serverEndpointUrl.host, 'user': username, 'password': password, 'secure': secure });
 }
 
-ftpClient.on('ready', uploadFiles);
-
-var secure = serverEndpointUrl.protocol.toLowerCase() == 'ftps:' ? true : false;
-tl.debug('secure ftp=' + secure);
-
-ftpClient.connect({ 'host': serverEndpointUrl.host, 'user': username, 'password': password, 'secure': secure });
+doWork();
