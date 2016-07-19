@@ -47,8 +47,12 @@ function addUrlSegment(baseUrl: string, segment: string): string {
     return resultUrl;
 }
 
-function failError(err): void {
-    fail(err);
+function handleError(err): void {
+    if (err.code == 'ECONNRESET') {
+        tl.debug(err);
+    } else {
+        fail(err);
+    }
 }
 
 function failReturnCode(httpResponse, message: string): void {
@@ -59,11 +63,13 @@ function failReturnCode(httpResponse, message: string): void {
     fail(fullMessage);
 }
 
+var taskFailed = false;
+
 function fail(message: string): void {
     tl.debug('fail');
     tl.debug(message);
     tl.setResult(tl.TaskResult.Failed, message);
-    tl.exit(1);
+    taskFailed = true;
 }
 
 enum JobState {
@@ -80,7 +86,7 @@ enum JobState {
 class Job {
     parent: Job; // if this job is a pipelined job, its parent that started it.
     children: Job[] = []; // any pipelined jobs
-    joined: Job // if this job is joined, the main job that is running
+    joined: Job; // if this job is joined, the main job that is running
     search: JobSearch;
 
     taskUrl: string; // URL for the job definition
@@ -214,14 +220,6 @@ class Job {
         }
     }
 
-    setParsedExecutionResult(parsedExecutionResult) {
-        this.parsedExecutionResult = parsedExecutionResult;
-        this.consoleLog('******************************************************************************\n');
-        this.consoleLog('Jenkins job finished: ' + this.name + '\n');
-        this.consoleLog(this.executableUrl + '\n');
-        this.consoleLog('******************************************************************************\n');
-    }
-
     setJoined(joinedJob: Job): void {
         tl.debug(this + '.setJoined(' + joinedJob + ')');
         this.joined = joinedJob;
@@ -241,6 +239,31 @@ class Job {
         for (var i in this.children) {
             this.children[i].cut();
         }
+    }
+
+    setParsedExecutionResult(parsedExecutionResult) {
+        this.parsedExecutionResult = parsedExecutionResult;
+        this.consoleLog('******************************************************************************\n');
+        this.consoleLog('Jenkins job finished: ' + this.name + '\n');
+        this.consoleLog(this.executableUrl + '\n');
+        this.consoleLog('******************************************************************************\n');
+        if (this.getTaskResult() == tl.TaskResult.Failed) {
+            taskFailed = true;
+        }
+    }
+
+    getTaskResult(): number {
+        if (this.state == JobState.Queued) {
+            return tl.TaskResult.Succeeded;
+        } else if (this.state == JobState.Done) {
+            var resultCode = this.parsedExecutionResult.result.toUpperCase();
+            if (resultCode == "SUCCESS" || resultCode == 'UNSTABLE') {
+                return tl.TaskResult.Succeeded;
+            } else {
+                return tl.TaskResult.Failed;
+            }
+        }
+        return tl.TaskResult.Failed;
     }
 
     getResultString(): string {
@@ -265,35 +288,6 @@ class Job {
         } else return 'Unknown';
     }
 
-    getTaskResult(finalJobState: JobState): number {
-        if (finalJobState == JobState.Queued) {
-            return tl.TaskResult.Succeeded;
-        } else if (finalJobState == JobState.Done) {
-            var resultCode = this.parsedExecutionResult.result.toUpperCase();
-            if (resultCode == "SUCCESS" || resultCode == 'UNSTABLE') {
-                return tl.TaskResult.Succeeded;
-            } else {
-                return tl.TaskResult.Failed;
-            }
-        }
-        return tl.TaskResult.Failed;
-    }
-
-    refreshJobTask(job, callback) {
-        var apiTaskUrl = addUrlSegment(this.taskUrl, "/api/json");
-        this.debug('getting job task URL:' + apiTaskUrl);
-        return request.get({ url: apiTaskUrl }, function requestCallBack(err, httpResponse, body) {
-            if (err) {
-                failError(err);
-            } else if (httpResponse.statusCode != 200) {
-                failReturnCode(httpResponse, 'Unable to retrieve job: ' + this.name);
-            } else {
-                job.parsedTaskBody = JSON.parse(body);
-                job.debug("parsedBody for: " + apiTaskUrl + ": " + JSON.stringify(job.parsedTaskBody));
-                callback();
-            }
-        }).auth(username, password, true);
-    }
 
     initialize() {
         var thisJob = this;
@@ -305,7 +299,9 @@ class Job {
             request.get({ url: apiTaskUrl }, function requestCallBack(err, httpResponse, body) {
                 if (!thisJob.search.parsedTaskBody) { // another callback could have updated thisJob
                     if (err) {
-                        failError(err);
+                        handleError(err); // something went bad
+                        thisJob.stopWork(pollInterval, thisJob.state);
+                        return;
                     } else if (httpResponse.statusCode != 200) {
                         failReturnCode(httpResponse, 'Unable to retrieve job: ' + thisJob.name);
                     } else {
@@ -388,6 +384,7 @@ class JobSearch {
     parsedTaskBody; // the parsed task body of the job definition
     initialSearchBuildNumber: number = -1; // the intial, most likely build number for child jobs
     nextSearchBuildNumber: number = -1; // the next build number to check
+    searchDirection: number = -1; // the direction to search, start by searching backwards
 
     working: boolean = false;
     workDelay: number = 0;
@@ -396,6 +393,7 @@ class JobSearch {
         this.parsedTaskBody = parsedTaskBody;
         this.initialSearchBuildNumber = parsedTaskBody.lastBuild.number;
         this.nextSearchBuildNumber = this.initialSearchBuildNumber;
+        this.searchDirection = -1;  // start searching backwards
     }
 
     doWork() {
@@ -560,7 +558,9 @@ class JobSearch {
             request.get({ url: url }, function requestCallback(err, httpResponse, body) {
                 tl.debug('locateExecution().requestCallback()');
                 if (err) {
-                    failError(err);
+                    handleError(err); // something went bad
+                    thisSearch.stopWork(pollInterval);
+                    return;
                 } else if (httpResponse.statusCode == 404) {
                     // try again in the future
                     thisSearch.stopWork(pollInterval);
@@ -587,7 +587,17 @@ class JobSearch {
                         }
                     });
 
-                    thisSearch.nextSearchBuildNumber++;
+                    if (thisSearch.searchDirection < 0) { // currently searching backwards
+                        if (this.nextSearchBuildNumber <= 1 || parsedBody.timestamp < jobQueue.rootJob.parsedExecutionResult.timestamp) {
+                            //either found the very first job, or one that was triggered before the root job was; need to change search directions
+                            thisSearch.searchDirection = 1;
+                            thisSearch.nextSearchBuildNumber = thisSearch.initialSearchBuildNumber + 1;
+                        } else {
+                            thisSearch.nextSearchBuildNumber--;
+                        }
+                    } else {
+                        thisSearch.nextSearchBuildNumber++;
+                    }
                     return thisSearch.stopWork(0); // immediately poll again because there might be more jobs
                 }
             }).auth(username, password, true);
@@ -618,7 +628,7 @@ class JobQueue {
             for (var i in running) {
                 running[i].doWork();
             }
-            if (this.getActiveJobs().length == 0) {
+            if (this.getActiveJobs().length == 0 || taskFailed) {
                 this.stop();
             } else {
                 this.flushJobConsolesSafely();
@@ -631,16 +641,25 @@ class JobQueue {
         clearInterval(this.intervalId);
         this.flushJobConsolesSafely();
         var message: string = null;
-        if (capturePipeline) {
-            message = 'Jenkins pipeline complete';
-        } else if (captureConsole) {
-            message = 'Jenkins job complete';
+        if (!taskFailed) {
+            if (capturePipeline) {
+                message = 'Jenkins pipeline complete';
+            } else if (captureConsole) {
+                message = 'Jenkins job complete';
+            } else {
+                message = 'Jenkins job queued';
+            }
+            tl.setResult(tl.TaskResult.Succeeded, message);
         } else {
-            message = 'Jenkins job queued';
+            if (capturePipeline) {
+                message = 'Jenkins pipeline failed';
+            } else if (captureConsole) {
+                message = 'Jenkins job failed';
+            } else {
+                message = 'Jenkins job failed to queue';
+            }
         }
         this.writeFinalMarkdown();
-        tl.setResult(tl.TaskResult.Succeeded, message);
-        tl.exit(0);
     }
 
     findRunningJobs(): Job[] {
@@ -761,11 +780,7 @@ class JobQueue {
             job = findWorkingJob(job);
             var jobState: JobState = job.state;
 
-            if (jobState == JobState.Done || jobState == JobState.Queued) {
-                jobContents += indent + '[' + job.name + ' #' + job.executableNumber + '](' + job.executableUrl + ') ' + job.getResultString() + '<br>\n';
-            } else {
-                console.log('Warning, still in active state: ' + job);
-            }
+            jobContents += indent + '[' + job.name + ' #' + job.executableNumber + '](' + job.executableUrl + ') ' + job.getResultString() + '<br>\n';
 
             var childContents = "";
             for (var i in job.children) {
@@ -813,7 +828,9 @@ function streamConsole(job: Job) {
     request.get({ url: fullUrl }, function requestCallback(err, httpResponse, body) {
         tl.debug('streamConsole().requestCallback()');
         if (err) {
-            failError(err);
+            handleError(err); // something went bad
+            job.stopWork(pollInterval, job.state);
+            return;
         } else if (httpResponse.statusCode == 404) {
             // got here too fast, stream not yet available, try again in the future
             job.stopWork(pollInterval, job.state);
@@ -847,7 +864,9 @@ function finish(job: Job) {
         request.get({ url: resultUrl }, function requestCallback(err, httpResponse, body) {
             tl.debug('finish().requestCallback()');
             if (err) {
-                fail(err);
+                handleError(err); // something went bad
+                job.stopWork(pollInterval, job.state);
+                return;
             } else if (httpResponse.statusCode != 200) {
                 failReturnCode(httpResponse, 'Job progress tracking failed to read job result');
             } else {
@@ -871,7 +890,7 @@ function trackJobQueued(queueUri: string) {
     request.get({ url: queueUri }, function requestCallback(err, httpResponse, body) {
         tl.debug('trackJobQueued().requestCallback()');
         if (err) {
-            failError(err);
+            fail(err);
         } else if (httpResponse.statusCode != 200) {
             failReturnCode(httpResponse, 'Job progress tracking failed to read job queue');
         } else {
@@ -928,26 +947,6 @@ var initialPostData = parameterizedJob ?
 
 tl.debug('initialPostData = ' + JSON.stringify(initialPostData));
 
-/**
- * This post starts the process by kicking off the job and then: 
- *    |
- *    |---------------            
- *    V              | not queued yet            
- * trackJobQueued() --  
- *    |
- * captureConsole --no--> createLinkAndFinish()   
- *    |
- *    |----------------------
- *    V                     | more stuff in console  
- * captureJenkinsConsole() --    
- *    |
- *    |-------------
- *    V            | keep checking until something
- * checkSuccess() -- 
- *    |
- *    V
- * createLinkAndFinish()
- */
 request.post(initialPostData, function optionalCallback(err, httpResponse, body) {
     if (err) {
         fail(err);
